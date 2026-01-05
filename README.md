@@ -265,3 +265,8 @@ uv run ruff format .
 ---
 
 **Made with ❤️ using LangGraph, FastAPI, and OpenAI**
+
+## 💬 社区交流
+
+![QQ群名片](docs/card.png)
+
