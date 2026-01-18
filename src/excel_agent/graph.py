@@ -29,13 +29,20 @@ from .tools import ALL_TOOLS, execute_pandas_query, calculate_allocated_costs
 from .logger import RichConsoleCallbackHandler, get_logger
 from .business_tools import get_service_details
 from .knowledge_base import get_knowledge_base, format_knowledge_context
+from .trace_store import TraceStore
+from .cache import get_intent_cache, set_intent_cache, get_rag_cache, set_rag_cache
 
 logger = get_logger("excel_agent.graph")
+
+
+import uuid
+from datetime import datetime
 
 
 class AgentState(TypedDict):
     """Agent 状态"""
 
+    trace_id: Annotated[Optional[str], lambda x, y: y]  # 会话追踪 ID
     messages: Annotated[List[BaseMessage], add_messages]
 
     # 意图分析
@@ -102,6 +109,11 @@ def load_context_node(state: AgentState) -> AgentState:
     retry_count = state.get("retry_count", 0)
     if retry_count is None:
         retry_count = 0
+
+    # 初始化 trace_id (如果不存在)
+    if not state.get("trace_id"):
+        state["trace_id"] = str(uuid.uuid4())
+
     state["user_query"] = user_query
     state["retry_count"] = retry_count
     state["error_message"] = state.get("error_message", "")  # 继承之前的错误（如果有）
@@ -122,22 +134,47 @@ def analyze_intent_node(state: AgentState) -> AgentState:
         excel_summary = (
             loader.get_summary() if loader.is_loaded else "未加载 Excel 文件"
         )
+        # 生成上下文哈希（用于缓存 Key），基于 Excel 文件名或摘要的简略哈希
+        context_hash = str(hash(excel_summary[:100]))
+
         user_query = state.get("user_query", "")
         error_context = state.get("error_message", "")
+
+        # 0. 检查意图缓存 (仅在无错误上下文时使用缓存)
+        if not error_context:
+            cached_intent = get_intent_cache(user_query, context_hash)
+            if cached_intent:
+                logger.info(f"✨ 命中意图缓存: {user_query}")
+                state["intent_analysis"] = cached_intent["intent_analysis"]
+                state["knowledge_context"] = cached_intent.get(
+                    "knowledge_context", "暂无相关知识参考。"
+                )
+                # 如果缓存中包含 SQL，也可以直接复用，但这里我们只复用 Intent Analysis
+                return state
 
         # RAG: 检索相关知识
         knowledge_context = "暂无相关知识参考。"
         try:
-            kb = get_knowledge_base()
-            if kb:
-                # 索引知识库目录（如果尚未索引）
-                if kb.get_stats()["total_entries"] == 0:
-                    kb.index_directory()
+            # 1. 检查 RAG 缓存
+            cached_rag = get_rag_cache(user_query)
+            if cached_rag:
+                knowledge_context = cached_rag
+                # logger.info("✨ 命中 RAG 缓存")
+            else:
+                kb = get_knowledge_base()
+                if kb:
+                    # 索引知识库目录（如果尚未索引）
+                    if kb.get_stats()["total_entries"] == 0:
+                        kb.index_directory()
 
-                relevant_knowledge = kb.search(query=user_query)
-                if relevant_knowledge:
-                    knowledge_context = format_knowledge_context(relevant_knowledge)
-                    # logger.info(f"RAG retrieved {len(relevant_knowledge)} items")
+                    relevant_knowledge = kb.search(query=user_query)
+                    if relevant_knowledge:
+                        knowledge_context = format_knowledge_context(relevant_knowledge)
+                        # logger.info(f"RAG retrieved {len(relevant_knowledge)} items")
+
+                    # 写入 RAG 缓存
+                    set_rag_cache(user_query, knowledge_context)
+
         except Exception as e:
             logger.warning(f"RAG search failed: {e}")
 
@@ -167,6 +204,15 @@ def analyze_intent_node(state: AgentState) -> AgentState:
         structured_llm = llm.with_structured_output(IntentAnalysisResult)
         response = structured_llm.invoke([HumanMessage(content=prompt)])
         state["intent_analysis"] = response
+
+        # 写入意图缓存 (仅在成功且无错误时)
+        if not error_context:
+            set_intent_cache(
+                user_query,
+                {"intent_analysis": response, "knowledge_context": knowledge_context},
+                context_hash,
+            )
+
         return state
     except Exception as e:
         state["error_message"] = f"意图分析节点执行错误。错误详情：{str(e)}"
@@ -492,6 +538,15 @@ def refine_answer_node(state: AgentState) -> AgentState:
     llm = get_llm()
     response = llm.invoke([HumanMessage(content=prompt)])
     state["messages"] = [response]
+
+    # 保存当前状态快照到 TraceStore
+    if state.get("trace_id"):
+        try:
+            TraceStore.save_trace(state["trace_id"], state)
+            # logger.info(f"Trace saved: {state['trace_id']}")
+        except Exception as e:
+            logger.warning(f"Failed to save trace: {e}")
+
     return state
 
 

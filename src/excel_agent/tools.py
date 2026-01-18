@@ -1013,60 +1013,71 @@ def _build_echart_config(
 
 
 def _calculate_allocated_costs_impl(
-    target_bl: str, year: str, scenario: str, function: Optional[str] = None
+    target: str,
+    target_type: str,
+    year: str,
+    scenario: str,
+    function: Optional[str] = None,
 ) -> pd.DataFrame:
-    if not target_bl or not year or not scenario or not function:
-        raise ValueError("target_bl, year, scenario, function 不能为空")
-    """内部实现：计算分摊费用，返回 DataFrame"""
+    """内部实现：计算分摊费用（支持 BL 和 CC）"""
+    if not target or not target_type or not year or not scenario:
+        raise ValueError("target, target_type, year, scenario 不能为空")
+
     loader = get_loader()
     tables = loader.get_loaded_dataframes()
-
     cdb = tables.get("CostDataBase")
     t7 = tables.get("Table7")
 
     if cdb is None or t7 is None:
-        raise ValueError("未找到 CostDataBase 或 Table7 表，请先加载数据。")
+        raise ValueError("未找到 CostDataBase 或 Table7 表")
 
-    # Step 1: Pre-filter tables
-    cdb_query = (
-        f"Year == '{year}' and Scenario == '{scenario}' and Function == '{function}'"
-    )
+    # 1. 筛选 CDB
+    cdb_query = f"Year == '{year}' and Scenario == '{scenario}'"
     if function:
         cdb_query += f" and Function == '{function}'"
-
     cdb_filtered = cdb.query(cdb_query).copy()
 
-    key = cdb_filtered["Key"].unique()
-    # 简单筛选
-    t7_filtered = t7.query(
-        f"Year == '{year}' and Scenario == '{scenario}' and BL == '{target_bl}' and Key.isin({key.tolist()})"
-    ).copy()
+    # 2. 筛选 T7
+    # 根据 target_type (BL 或 CC) 动态构建查询
+    if target_type.upper() == "BL":
+        t7_query = f"Year == '{year}' and Scenario == '{scenario}' and BL == '{target}'"
+    elif target_type.upper() == "CC":
+        # CC 可能是数字，尝试转换
+        try:
+            target_cc = int(target)
+            t7_query = (
+                f"Year == '{year}' and Scenario == '{scenario}' and CC == {target_cc}"
+            )
+        except ValueError:
+            t7_query = (
+                f"Year == '{year}' and Scenario == '{scenario}' and CC == '{target}'"
+            )
+    else:
+        raise ValueError(f"不支持的目标类型: {target_type}，仅支持 BL 或 CC")
 
-    # Step 2: Pre-aggregate Rate table
+    # 仅保留 CDB 中存在的 Key
+    valid_keys = cdb_filtered["Key"].unique()
+    t7_filtered = t7.query(t7_query).copy()
+    t7_filtered = t7_filtered[t7_filtered["Key"].isin(valid_keys)]
+
+    if len(t7_filtered) == 0:
+        # 如果没有匹配的分摊记录，返回空结果
+        return pd.DataFrame(columns=["Month", "Allocated_Amount"])
+
+    # 3. 聚合 Rate
     rate_col = "RateNo" if "RateNo" in t7_filtered.columns else "Value"
-    if rate_col not in t7_filtered.columns:
-        raise ValueError(
-            f"Table7 中未找到费率列 (RateNo 或 Value)。可用列: {list(t7_filtered.columns)}"
-        )
-
     t7_agg = t7_filtered.groupby(["Month", "Key"])[rate_col].sum().reset_index()
     t7_agg = t7_agg.rename(columns={rate_col: "Agg_Rate"})
 
-    # Step 3: Merge
-    merged_df = pd.merge(cdb_filtered, t7_agg, on=["Month", "Key"], how="left")
+    # 4. Merge
+    merged = pd.merge(cdb_filtered, t7_agg, on=["Month", "Key"], how="left")
 
-    # Step 4: Calculate
-    merged_df["Agg_Rate"] = merged_df["Agg_Rate"].fillna(0)
-    merged_df["Allocated_Amount"] = merged_df["Amount"] * merged_df["Agg_Rate"]
-    # Step 5: Aggregate by Month and other fields
-    agg_dict = {"Allocated_Amount": "sum"}
-    # 保留 merged_df 中除 Month 外的其它字段（取第一条）
-    other_cols = [
-        c for c in merged_df.columns if c not in {"Month", "Allocated_Amount"}
-    ]
-    for col in other_cols:
-        agg_dict[col] = "first"
-    result = merged_df.groupby("Month", as_index=False).agg(agg_dict)
+    # 5. Calculate
+    merged["Agg_Rate"] = merged["Agg_Rate"].fillna(0)
+    merged["Allocated_Amount"] = merged["Amount"] * merged["Agg_Rate"]
+
+    # 6. Aggregate
+    result = merged.groupby("Month")["Allocated_Amount"].sum().reset_index()
 
     # 排序
     month_order = {
@@ -1085,48 +1096,306 @@ def _calculate_allocated_costs_impl(
     }
     result["Month_Num"] = result["Month"].map(month_order)
     result = result.sort_values("Month_Num").drop(columns=["Month_Num"])
-    total = result["Allocated_Amount"].sum()
-    result["Total"] = total
+
     return result
 
 
 @tool
 def calculate_allocated_costs(
-    target_bl: str, year: str, scenario: str, function: Optional[str] = None
+    target: str,
+    target_type: str,
+    year: str,
+    scenario: str,
+    function: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """计算特定业务线 (BL) 在指定年份和场景下的分摊费用。
-
-    逻辑：
-    1. 筛选 CostDataBase (cdb) 和 Table7 (t7)。
-    2. 对 Table7 按 [Month, Key] 汇总 RateNo，确保费率唯一。
-    3. 将 cdb 与 汇总后的 t7 按 [Month, Key] 左连接。
-    4. 计算分摊金额 = Amount * RateNo。
-    5. 按 Month 汇总分摊金额。
+    """计算特定目标 (BL 或 CC) 在指定年份和场景下的分摊费用。
 
     Args:
-        target_bl: 目标业务线 (BL)。
-        year: 年份。
-        scenario: 场景。
-        function: 可选，筛选 CostDataBase 的 Function 列，
+        target: 目标名称 (如 "CB" 或 "413001")
+        target_type: 目标类型 ("BL" 或 "CC")
+        year: 年份 (如 "FY26")
+        scenario: 场景 (如 "Budget1")
+        function: 可选，筛选 CostDataBase 的 Function (如 "HR Allocation")
 
     Returns:
-        按月汇总的分摊费用结果。
+        按月汇总的分摊费用结果
     """
-    # 检查参数
-    if not target_bl or not year or not scenario or not function:
-        return {"error": "target_bl, year, scenario, function 不能为空"}
-    if "Allocation" not in function:
-        return {"error": "function必须包含Allocation"}
-    # logger.info(
-    #     f"正在执行工具: calculate_allocated_costs, 参数: target_bl={target_bl}, year={year}, scenario={scenario}, function={function}"
-    # )
     try:
-        df = _calculate_allocated_costs_impl(target_bl, year, scenario, function)
-        # logger.info(f"工具 calculate_allocated_costs 执行成功, 返回结果: {df}")
+        df = _calculate_allocated_costs_impl(
+            target, target_type, year, scenario, function
+        )
+        total = df["Allocated_Amount"].sum()
+        result = _df_to_result(df)
+        result["total_amount"] = total
+        return result
+    except Exception as e:
+        return {"error": f"分摊计算出错: {str(e)}"}
+
+
+def _compare_allocated_costs_impl(
+    target1: str,
+    target_type1: str,
+    year1: str,
+    scenario1: str,
+    target2: str,
+    target_type2: str,
+    year2: str,
+    scenario2: str,
+    function: Optional[str] = None,
+) -> pd.DataFrame:
+    """内部实现：对比分摊结果"""
+
+    # 分别计算两个场景的分摊
+    df1 = _calculate_allocated_costs_impl(
+        target1, target_type1, year1, scenario1, function
+    )
+    df2 = _calculate_allocated_costs_impl(
+        target2, target_type2, year2, scenario2, function
+    )
+
+    amt1 = df1["Allocated_Amount"].sum()
+    amt2 = df2["Allocated_Amount"].sum()
+
+    diff = amt1 - amt2
+    pct = (diff / amt2 * 100) if amt2 != 0 else 0
+
+    return pd.DataFrame(
+        {
+            "Metric": ["Allocated Amount"],
+            f"{year1} {scenario1} ({target1})": [amt1],
+            f"{year2} {scenario2} ({target2})": [amt2],
+            "Difference": [diff],
+            "Pct_Change": [pct],
+        }
+    )
+
+
+@tool
+def compare_allocated_costs(
+    target1: str,
+    target_type1: str,
+    year1: str,
+    scenario1: str,
+    target2: str,
+    target_type2: str,
+    year2: str,
+    scenario2: str,
+    function: Optional[str] = None,
+) -> Dict[str, Any]:
+    """对比两个不同分摊场景的结果差异。
+    支持不同目标(BL/CC)、不同年份、不同场景的交叉对比。
+
+    Args:
+        target1: 目标1名称
+        target_type1: 目标1类型 ("BL" 或 "CC")
+        year1: 年份1
+        scenario1: 场景1
+        target2: 目标2名称
+        target_type2: 目标2类型 ("BL" 或 "CC")
+        year2: 年份2
+        scenario2: 场景2
+        function: 可选，筛选 Function
+
+    Returns:
+        对比结果表
+    """
+    try:
+        df = _compare_allocated_costs_impl(
+            target1,
+            target_type1,
+            year1,
+            scenario1,
+            target2,
+            target_type2,
+            year2,
+            scenario2,
+            function,
+        )
         return _df_to_result(df)
     except Exception as e:
-        # logger.error(f"工具 calculate_allocated_costs 执行出错: {str(e)}")
-        return {"error": f"分摊计算出错: {str(e)}"}
+        return {"error": f"分摊对比出错: {str(e)}"}
+
+
+def _calculate_trend_impl(
+    year: str, scenario: str, function: Optional[str] = None
+) -> pd.DataFrame:
+    """内部实现：计算成本趋势"""
+    loader = get_loader()
+    tables = loader.get_loaded_dataframes()
+    cdb = tables.get("CostDataBase")
+
+    if cdb is None:
+        raise ValueError("未找到 CostDataBase 表")
+
+    query = f"Year == '{year}' and Scenario == '{scenario}'"
+    if function:
+        query += f" and Function == '{function}'"
+
+    df = cdb.query(query).copy()
+
+    # 按月汇总
+    result = df.groupby("Month")["Amount"].sum().reset_index()
+
+    # 排序月份
+    month_order = {
+        "Oct": 1,
+        "Nov": 2,
+        "Dec": 3,
+        "Jan": 4,
+        "Feb": 5,
+        "Mar": 6,
+        "Apr": 7,
+        "May": 8,
+        "Jun": 9,
+        "Jul": 10,
+        "Aug": 11,
+        "Sep": 12,
+    }
+    result["Month_Num"] = result["Month"].map(month_order)
+    result = result.sort_values("Month_Num").drop(columns=["Month_Num"])
+
+    # 计算环比增长率
+    result["MoM_Growth"] = result["Amount"].pct_change() * 100
+
+    return result
+
+
+@tool
+def calculate_trend(
+    year: str, scenario: str, function: Optional[str] = None
+) -> Dict[str, Any]:
+    """计算指定年份和场景下的成本月度趋势及环比增长。
+
+    Args:
+        year: 年份 (如 FY24)
+        scenario: 场景 (如 Actual)
+        function: 可选，筛选 Function
+
+    Returns:
+        按月汇总的金额及环比增长率
+    """
+    try:
+        df = _calculate_trend_impl(year, scenario, function)
+        return _df_to_result(df)
+    except Exception as e:
+        return {"error": f"趋势计算出错: {str(e)}"}
+
+
+def _analyze_cost_composition_impl(
+    year: str, scenario: str, dimension: str = "Category"
+) -> pd.DataFrame:
+    """内部实现：分析成本构成"""
+    loader = get_loader()
+    tables = loader.get_loaded_dataframes()
+    cdb = tables.get("CostDataBase")
+
+    if cdb is None:
+        raise ValueError("未找到 CostDataBase 表")
+
+    if dimension not in cdb.columns:
+        raise ValueError(f"维度 '{dimension}' 不存在")
+
+    df = cdb.query(f"Year == '{year}' and Scenario == '{scenario}'").copy()
+
+    # 按维度汇总
+    result = df.groupby(dimension)["Amount"].sum().reset_index()
+
+    # 计算占比
+    total = result["Amount"].sum()
+    result["Percentage"] = (result["Amount"] / total * 100).round(2)
+
+    # 按金额降序排列
+    result = result.sort_values("Amount", ascending=False)
+
+    return result
+
+
+@tool
+def analyze_cost_composition(
+    year: str, scenario: str, dimension: str = "Category"
+) -> Dict[str, Any]:
+    """分析指定年份和场景下的成本构成（按维度汇总并计算占比）。
+
+    Args:
+        year: 年份 (如 FY24)
+        scenario: 场景 (如 Actual)
+        dimension: 分析维度 (如 Category, Account, Function)，默认为 Category
+
+    Returns:
+        按维度汇总的金额及占比
+    """
+    try:
+        df = _analyze_cost_composition_impl(year, scenario, dimension)
+        return _df_to_result(df)
+    except Exception as e:
+        return {"error": f"构成分析出错: {str(e)}"}
+
+
+def _compare_scenarios_impl(
+    year1: str,
+    scenario1: str,
+    year2: str,
+    scenario2: str,
+    function: Optional[str] = None,
+) -> pd.DataFrame:
+    """内部实现：对比两个场景"""
+    loader = get_loader()
+    tables = loader.get_loaded_dataframes()
+    cdb = tables.get("CostDataBase")
+
+    if cdb is None:
+        raise ValueError("未找到 CostDataBase 表")
+
+    # 获取两个场景的数据
+    def get_amount(y, s, f):
+        query = f"Year == '{y}' and Scenario == '{s}'"
+        if f:
+            query += f" and Function == '{f}'"
+        return cdb.query(query)["Amount"].sum()
+
+    amount1 = get_amount(year1, scenario1, function)
+    amount2 = get_amount(year2, scenario2, function)
+
+    diff = amount1 - amount2
+    pct_change = (diff / amount2 * 100) if amount2 != 0 else 0
+
+    return pd.DataFrame(
+        {
+            "Metric": ["Amount"],
+            f"{year1} {scenario1}": [amount1],
+            f"{year2} {scenario2}": [amount2],
+            "Difference": [diff],
+            "Pct_Change": [pct_change],
+        }
+    )
+
+
+@tool
+def compare_scenarios(
+    year1: str,
+    scenario1: str,
+    year2: str,
+    scenario2: str,
+    function: Optional[str] = None,
+) -> Dict[str, Any]:
+    """对比两个不同年份/场景的总金额差异。
+    通常用于计算同比(YoY)或预算执行偏差(Budget vs Actual)。
+
+    Args:
+        year1: 目标年份 (如 FY26)
+        scenario1: 目标场景 (如 Budget1)
+        year2: 基准年份 (如 FY25)
+        scenario2: 基准场景 (如 Actual)
+        function: 可选，筛选 Function (如 Procurement)
+
+    Returns:
+        包含两个场景金额、差异值及百分比变化的表格
+    """
+    try:
+        df = _compare_scenarios_impl(year1, scenario1, year2, scenario2, function)
+        return _df_to_result(df)
+    except Exception as e:
+        return {"error": f"场景对比出错: {str(e)}"}
 
 
 @tool
@@ -1273,8 +1542,11 @@ ALL_TOOLS = [
     generate_chart,
     execute_pandas_query,
     calculate_allocated_costs,  # 新增工具
+    calculate_trend,
+    analyze_cost_composition,
+    compare_scenarios,
+    compare_allocated_costs,
 ]
-
 from .business_tools import get_service_details
 
 ALL_TOOLS.append(get_service_details)

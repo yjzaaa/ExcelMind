@@ -946,6 +946,50 @@
             border-color: var(--accent);
         }
 
+        /* Feedback Buttons */
+        .feedback-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        .message:hover .feedback-actions {
+            opacity: 1;
+        }
+
+        .btn-feedback {
+            background: transparent;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 4px 8px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .btn-feedback:hover {
+            background: var(--bg-hover);
+            color: var(--text-primary);
+        }
+
+        .btn-feedback.active-good {
+            background: rgba(34, 197, 94, 0.15);
+            color: var(--success);
+            border-color: var(--success);
+        }
+
+        .btn-feedback.active-bad {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--error);
+            border-color: var(--error);
+        }
+
         /* Markdown */
         .message-content table {
             border-collapse: collapse;
@@ -2336,6 +2380,7 @@
             contentDiv.appendChild(responseContainer);
 
             let responseTableId = currentTableId;
+            let currentTraceId = null;
 
             try {
                 const response = await fetch('/chat/stream', {
@@ -2369,6 +2414,12 @@
                             try {
                                 const event = JSON.parse(line.slice(6));
                                 if (event.type === 'table_info') { responseTableId = event.table_id; continue; }
+                                if (event.type === 'trace_info') { 
+                                    currentTraceId = event.trace_id; 
+                                    // 存储 trace_id 到消息元素
+                                    assistantMsg.dataset.traceId = currentTraceId;
+                                    continue; 
+                                }
                                 handleStreamEvent(event, contentDiv, {
                                     getThinkingBlock: () => {
                                         if (!currentThinkingBlock) {
@@ -2415,6 +2466,11 @@
 
                 if (responseText) {
                     conversationHistory.push({ role: 'assistant', content: responseText, tableId: responseTableId });
+                    
+                    // 如果成功获取到 trace_id，显示反馈按钮
+                    if (currentTraceId) {
+                        addFeedbackButtons(assistantMsg, currentTraceId);
+                    }
                 }
                 chatMessages.scrollTop = chatMessages.scrollHeight;
             } catch (error) {
@@ -2423,6 +2479,60 @@
                 isProcessing = false;
                 sendBtn.disabled = false;
                 chatInput.focus();
+            }
+        }
+
+        function addFeedbackButtons(messageDiv, traceId) {
+            const feedbackDiv = document.createElement('div');
+            feedbackDiv.className = 'feedback-actions';
+            feedbackDiv.innerHTML = `
+                <button class="btn-feedback btn-good" title="回答正确">👍</button>
+                <button class="btn-feedback btn-bad" title="回答错误">👎</button>
+            `;
+            
+            const btnGood = feedbackDiv.querySelector('.btn-good');
+            const btnBad = feedbackDiv.querySelector('.btn-bad');
+            
+            btnGood.addEventListener('click', () => submitFeedback(traceId, true, btnGood, btnBad));
+            btnBad.addEventListener('click', () => submitFeedback(traceId, false, btnBad, btnGood));
+            
+            messageDiv.querySelector('.message-content').appendChild(feedbackDiv);
+        }
+
+        async function submitFeedback(traceId, isCorrect, activeBtn, otherBtn) {
+            if (activeBtn.classList.contains('active-good') || activeBtn.classList.contains('active-bad')) {
+                return; // 已经反馈过
+            }
+            
+            // 简单的 UI 交互
+            activeBtn.classList.add(isCorrect ? 'active-good' : 'active-bad');
+            otherBtn.disabled = true;
+            otherBtn.style.opacity = '0.5';
+            
+            try {
+                const response = await fetch('/feedback', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        trace_id: traceId,
+                        is_correct: isCorrect
+                    })
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    console.log('Feedback submitted:', data);
+                    // 如果是正向反馈，可以提示用户已生成知识
+                    if (isCorrect) {
+                        activeBtn.title = "已确认并生成知识";
+                        // 刷新知识库列表
+                        setTimeout(loadKnowledgeEntries, 1000);
+                    }
+                } else {
+                    console.error('Feedback failed');
+                }
+            } catch (e) {
+                console.error('Feedback error:', e);
             }
         }
 

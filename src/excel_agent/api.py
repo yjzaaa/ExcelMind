@@ -26,6 +26,9 @@ from dotenv import load_dotenv
 # 防止通过 uvicorn 直接启动时（绕过 main.py）环境变量缺失
 load_dotenv()
 
+# FIX: Bypass proxy for localhost to avoid 502 errors with LM Studio/Ollama
+os.environ["NO_PROXY"] = "localhost,127.0.0.1"
+
 logger = get_logger("excel_agent.api")
 
 
@@ -104,11 +107,20 @@ class ChatRequest(BaseModel):
     history: Optional[list] = None  # 历史对话列表
 
 
+class FeedbackRequest(BaseModel):
+    """反馈请求"""
+
+    trace_id: str
+    is_correct: bool
+    user_comment: Optional[str] = None
+
+
 class ChatResponse(BaseModel):
     """聊天响应"""
 
     success: bool
     response: str
+    trace_id: Optional[str] = None  # 返回 trace_id 供前端反馈使用
     tool_calls: Optional[list] = None
 
 
@@ -445,6 +457,9 @@ async def chat(request: ChatRequest):
         # 执行图
         result = graph.invoke(inputs)
 
+        # 提取 trace_id
+        trace_id = result.get("trace_id")
+
         # 提取响应
         messages = result.get("messages", [])
         response_text = ""
@@ -465,6 +480,7 @@ async def chat(request: ChatRequest):
         return ChatResponse(
             success=True,
             response=response_text,
+            trace_id=trace_id,
             tool_calls=tool_calls if tool_calls else None,
         )
     except Exception as e:
@@ -483,8 +499,31 @@ async def chat_stream(request: ChatRequest):
     active_table_id = loader.active_table_id
 
     async def generate():
+        # 执行图（流式）
+        graph = get_graph()
+
+        # 准备输入
+        inputs = {
+            "messages": [HumanMessage(content=request.message)],
+            "is_relevant": True,
+        }
+
         # 先发送表ID信息
         yield f"data: {json_dumps({'type': 'table_info', 'table_id': active_table_id}, ensure_ascii=False)}\n\n"
+
+        # 处理流式输出并捕获 trace_id
+        current_trace_id = None
+
+        # 这里我们需要更细粒度的控制流，以便获取 graph 的输出 state
+        # 但 stream_chat 是封装好的，我们可能需要修改 stream_chat 或在这里重新实现部分逻辑
+        # 简单起见，我们假设 stream_chat 会 yield 所有事件，包括 trace_id 更新
+
+        # 由于 stream_chat 目前只 yield 消息块，我们无法轻易获取 trace_id
+        # 临时方案：我们不修改 stream_chat，而是让 graph 内部通过回调或其他方式传递，
+        # 或者简化处理：流式暂不支持反馈功能，或者后续完善 stream.py
+
+        # 为了支持反馈，我们在流式结束时，尝试从 graph state 中获取 trace_id (这需要重构 stream_chat)
+        # 现阶段我们仅在普通 chat 接口支持反馈。流式接口后续支持。
 
         async for event in stream_chat(request.message, request.history):
             yield f"data: {json_dumps(event, ensure_ascii=False)}\n\n"
@@ -505,6 +544,23 @@ async def reset():
     reset_loader()
     reset_graph()
     return {"success": True, "message": "已重置 Agent 状态，所有表已清空"}
+
+
+from .feedback_manager import get_feedback_manager
+
+
+@app.post("/feedback")
+async def submit_feedback(request: FeedbackRequest):
+    """提交用户反馈（人工确认）"""
+    manager = get_feedback_manager()
+
+    result = manager.handle_feedback(
+        trace_id=request.trace_id,
+        is_correct=request.is_correct,
+        user_comment=request.user_comment,
+    )
+
+    return {"success": True, "message": result}
 
 
 # ============ 知识库管理 API ============
