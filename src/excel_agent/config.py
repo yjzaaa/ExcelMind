@@ -7,10 +7,15 @@ from typing import Optional, Dict
 
 import yaml
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+
+# 确保在配置模块加载时也尝试加载环境变量
+load_dotenv()
 
 
 class ProviderConfig(BaseModel):
     """单个模型提供者配置"""
+
     provider: str = "openai"
     model_name: str = "gpt-4"
     api_key: str = ""
@@ -22,13 +27,14 @@ class ProviderConfig(BaseModel):
 
 class ModelConfig(BaseModel):
     """模型配置 - 支持多渠道切换"""
+
     # 当前激活的渠道名称
     active: str = "default"
     # 多个渠道配置
-    providers: Dict[str, ProviderConfig] = Field(default_factory=lambda: {
-        "default": ProviderConfig()
-    })
-    
+    providers: Dict[str, ProviderConfig] = Field(
+        default_factory=lambda: {"default": ProviderConfig()}
+    )
+
     # 向后兼容的单一配置字段 (用于旧配置格式)
     provider: Optional[str] = None
     model_name: Optional[str] = None
@@ -36,13 +42,13 @@ class ModelConfig(BaseModel):
     base_url: Optional[str] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
-    
+
     def get_active_provider(self) -> ProviderConfig:
         """获取当前激活的提供者配置"""
         # 如果使用新的 providers 格式
         if self.providers and self.active in self.providers:
             return self.providers[self.active]
-        
+
         # 向后兼容：如果使用旧格式，构建一个 ProviderConfig
         return ProviderConfig(
             provider=self.provider or "openai",
@@ -50,9 +56,9 @@ class ModelConfig(BaseModel):
             api_key=self.api_key or "",
             base_url=self.base_url,
             temperature=self.temperature or 0.1,
-            max_tokens=self.max_tokens or 4096
+            max_tokens=self.max_tokens or 4096,
         )
-    
+
     def list_providers(self) -> Dict[str, str]:
         """列出所有可用的渠道及其描述"""
         return {
@@ -63,6 +69,7 @@ class ModelConfig(BaseModel):
 
 class ExcelConfig(BaseModel):
     """Excel 配置"""
+
     max_preview_rows: int = 5
     default_result_limit: int = 20
     max_result_limit: int = 1000
@@ -70,12 +77,14 @@ class ExcelConfig(BaseModel):
 
 class ServerConfig(BaseModel):
     """服务器配置"""
+
     host: str = "0.0.0.0"
     port: int = 8000
 
 
 class EmbeddingProviderConfig(BaseModel):
     """单个 Embedding 提供者配置"""
+
     model: str = "qwen3-embedding-0.6b"
     dims: int = 1536  # 向量维度，不同模型可能不同
     api_url: str = ""
@@ -85,33 +94,34 @@ class EmbeddingProviderConfig(BaseModel):
 
 class EmbeddingConfig(BaseModel):
     """Embedding 模型配置 - 支持多渠道切换"""
+
     # 当前激活的渠道名称
     active: str = "default"
     # 多个渠道配置
-    providers: Dict[str, EmbeddingProviderConfig] = Field(default_factory=lambda: {
-        "default": EmbeddingProviderConfig()
-    })
-    
+    providers: Dict[str, EmbeddingProviderConfig] = Field(
+        default_factory=lambda: {"default": EmbeddingProviderConfig()}
+    )
+
     # 向后兼容的单一配置字段 (用于旧配置格式)
     model: Optional[str] = None
     dims: Optional[int] = None
     api_url: Optional[str] = None
     api_key: Optional[str] = None
-    
+
     def get_active_provider(self) -> EmbeddingProviderConfig:
         """获取当前激活的提供者配置"""
         # 如果使用新的 providers 格式
         if self.providers and self.active in self.providers:
             return self.providers[self.active]
-        
+
         # 向后兼容：如果使用旧格式，构建一个 EmbeddingProviderConfig
         return EmbeddingProviderConfig(
             model=self.model or "qwen3-embedding-0.6b",
             dims=self.dims or 1536,
             api_url=self.api_url or "",
-            api_key=self.api_key or "empty"
+            api_key=self.api_key or "empty",
         )
-    
+
     def list_providers(self) -> Dict[str, str]:
         """列出所有可用的渠道及其描述"""
         return {
@@ -122,6 +132,7 @@ class EmbeddingConfig(BaseModel):
 
 class KnowledgeBaseConfig(BaseModel):
     """知识库配置"""
+
     enabled: bool = True
     knowledge_dir: str = "knowledge"  # 知识条目目录
     vector_db_path: str = ".vector_db"  # 向量库持久化路径
@@ -130,23 +141,31 @@ class KnowledgeBaseConfig(BaseModel):
     auto_extract_metadata: bool = True  # 是否自动提取元数据
 
 
+class LoggingConfig(BaseModel):
+    """日志配置"""
+
+    level: str = "INFO"
+
+
 class AppConfig(BaseModel):
     """应用配置"""
+
     model: ModelConfig = Field(default_factory=ModelConfig)
     excel: ExcelConfig = Field(default_factory=ExcelConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     knowledge_base: KnowledgeBaseConfig = Field(default_factory=KnowledgeBaseConfig)
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
 
 def _expand_env_vars(value: str) -> str:
     """展开环境变量 ${VAR} 格式"""
-    pattern = re.compile(r'\$\{(\w+)\}')
-    
+    pattern = re.compile(r"\$\{(\w+)\}")
+
     def replacer(match):
         env_var = match.group(1)
         return os.environ.get(env_var, "")
-    
+
     return pattern.sub(replacer, value)
 
 
@@ -165,10 +184,10 @@ def _process_config_dict(config: dict) -> dict:
 
 def load_config(config_path: Optional[str] = None) -> AppConfig:
     """加载配置文件
-    
+
     Args:
         config_path: 配置文件路径，默认为项目根目录的 config.yaml
-        
+
     Returns:
         AppConfig 实例
     """
@@ -182,13 +201,26 @@ def load_config(config_path: Optional[str] = None) -> AppConfig:
             if p.exists():
                 config_path = str(p)
                 break
-    
+
+    # 增加自动回退查找逻辑：如果指定的路径不存在，尝试默认位置
+    if config_path and not Path(config_path).exists():
+        # print(f"Warning: Config file '{config_path}' not found, trying default locations...")
+        possible_paths = [
+            Path("config.yaml"),
+            Path(__file__).parent.parent.parent / "config.yaml",
+        ]
+        for p in possible_paths:
+            if p.exists():
+                config_path = str(p)
+                # print(f"Found config at: {config_path}")
+                break
+
     if config_path and Path(config_path).exists():
         with open(config_path, "r", encoding="utf-8") as f:
             raw_config = yaml.safe_load(f) or {}
         config_dict = _process_config_dict(raw_config)
         return AppConfig(**config_dict)
-    
+
     return AppConfig()
 
 

@@ -16,29 +16,37 @@ from .config import get_config, load_config, set_config
 from .excel_loader import get_loader, reset_loader
 from .graph import get_graph, reset_graph
 from .stream import stream_chat
+from .logger import get_logger
 
 import tempfile
 import os
+from dotenv import load_dotenv
+
+# 确保在 API 模块加载时也尝试加载环境变量，
+# 防止通过 uvicorn 直接启动时（绕过 main.py）环境变量缺失
+load_dotenv()
+
+logger = get_logger("excel_agent.api")
 
 
 class CustomJSONEncoder(json.JSONEncoder):
     """自定义 JSON 编码器，处理 Pandas/Numpy 类型"""
-    
+
     def default(self, obj):
         # 处理 Pandas Timestamp
-        if hasattr(obj, 'isoformat'):
+        if hasattr(obj, "isoformat"):
             return obj.isoformat()
         # 处理 numpy 类型
-        if hasattr(obj, 'item'):
+        if hasattr(obj, "item"):
             return obj.item()
         # 处理 numpy 数组
-        if hasattr(obj, 'tolist'):
+        if hasattr(obj, "tolist"):
             return obj.tolist()
         # 处理 pandas NaT
-        if str(obj) == 'NaT':
+        if str(obj) == "NaT":
             return None
         # 处理 pandas NA
-        if str(obj) == '<NA>':
+        if str(obj) == "<NA>":
             return None
         return super().default(obj)
 
@@ -46,6 +54,7 @@ class CustomJSONEncoder(json.JSONEncoder):
 def json_dumps(obj, **kwargs):
     """使用自定义编码器的 JSON 序列化函数"""
     return json.dumps(obj, cls=CustomJSONEncoder, **kwargs)
+
 
 # 创建 FastAPI 应用
 app = FastAPI(
@@ -72,12 +81,14 @@ async def favicon():
 
 class LoadExcelRequest(BaseModel):
     """加载 Excel 请求"""
+
     file_path: str
     sheet_name: Optional[str] = None
 
 
 class LoadExcelResponse(BaseModel):
     """加载 Excel 响应"""
+
     success: bool
     message: str
     table_id: Optional[str] = None
@@ -88,12 +99,14 @@ class LoadExcelResponse(BaseModel):
 
 class ChatRequest(BaseModel):
     """聊天请求"""
+
     message: str
     history: Optional[list] = None  # 历史对话列表
 
 
 class ChatResponse(BaseModel):
     """聊天响应"""
+
     success: bool
     response: str
     tool_calls: Optional[list] = None
@@ -101,6 +114,7 @@ class ChatResponse(BaseModel):
 
 class TableInfo(BaseModel):
     """表信息"""
+
     id: str
     filename: str
     sheet_name: str
@@ -112,6 +126,7 @@ class TableInfo(BaseModel):
 
 class StatusResponse(BaseModel):
     """状态响应"""
+
     excel_loaded: bool
     tables: Optional[List[Dict[str, Any]]] = None  # 所有表信息
     active_table_id: Optional[str] = None
@@ -120,6 +135,7 @@ class StatusResponse(BaseModel):
 
 class SetActiveTableRequest(BaseModel):
     """设置活跃表请求"""
+
     table_id: str
 
 
@@ -129,7 +145,8 @@ async def root():
     frontend_path = Path(__file__).parent / "frontend" / "index.html"
     if frontend_path.exists():
         return HTMLResponse(content=frontend_path.read_text(encoding="utf-8"))
-    return HTMLResponse(content="""
+    return HTMLResponse(
+        content="""
     <html>
         <head><title>Excel Agent</title></head>
         <body>
@@ -137,20 +154,21 @@ async def root():
             <p>API 文档: <a href="/docs">/docs</a></p>
         </body>
     </html>
-    """)
+    """
+    )
 
 
 @app.get("/status", response_model=StatusResponse)
 async def get_status():
     """获取当前状态（包含多表信息）"""
     loader = get_loader()
-    
+
     if not loader.is_loaded:
         return StatusResponse(excel_loaded=False)
-    
+
     # 获取所有表信息
     tables = loader.list_tables()
-    
+
     # 获取活跃表详情
     active_loader = loader.get_active_loader()
     active_table = None
@@ -163,7 +181,7 @@ async def get_status():
             "total_columns": structure["total_columns"],
             "columns": structure["columns"],
         }
-    
+
     return StatusResponse(
         excel_loaded=True,
         tables=tables,
@@ -187,18 +205,18 @@ async def list_tables():
 async def set_active_table(request: SetActiveTableRequest):
     """设置当前活跃表"""
     loader = get_loader()
-    
+
     if not loader.set_active_table(request.table_id):
         raise HTTPException(status_code=404, detail=f"表不存在: {request.table_id}")
-    
+
     # 重置图以使用新的活跃表数据
     reset_graph()
-    
+
     # 获取新活跃表的信息
     active_loader = loader.get_active_loader()
     structure = active_loader.get_structure() if active_loader else None
     preview = active_loader.get_preview() if active_loader else None
-    
+
     return {
         "success": True,
         "message": f"已切换到表: {request.table_id}",
@@ -212,13 +230,13 @@ async def set_active_table(request: SetActiveTableRequest):
 async def delete_table(table_id: str):
     """删除指定表"""
     loader = get_loader()
-    
+
     if not loader.remove_table(table_id):
         raise HTTPException(status_code=404, detail=f"表不存在: {table_id}")
-    
+
     # 重置图
     reset_graph()
-    
+
     return {
         "success": True,
         "message": f"已删除表: {table_id}",
@@ -232,10 +250,10 @@ async def get_table_columns(table_id: str):
     """获取指定表的列名列表"""
     loader = get_loader()
     columns = loader.get_table_columns(table_id)
-    
+
     if not columns:
         raise HTTPException(status_code=404, detail=f"表不存在或无数据: {table_id}")
-    
+
     return {
         "success": True,
         "table_id": table_id,
@@ -245,6 +263,7 @@ async def get_table_columns(table_id: str):
 
 class JoinTablesRequest(BaseModel):
     """连接表请求（支持多字段连接）"""
+
     table1_id: str
     table2_id: str
     keys1: List[str]  # 表1的连接字段列表
@@ -257,7 +276,7 @@ class JoinTablesRequest(BaseModel):
 async def join_tables(request: JoinTablesRequest):
     """连接两张表（支持多字段连接）"""
     loader = get_loader()
-    
+
     try:
         table_id, structure = loader.join_tables(
             table1_id=request.table1_id,
@@ -267,10 +286,10 @@ async def join_tables(request: JoinTablesRequest):
             join_type=request.join_type,
             new_name=request.new_name,
         )
-        
+
         # 重置图
         reset_graph()
-        
+
         return {
             "success": True,
             "message": f"成功创建连接表: {request.new_name}",
@@ -286,6 +305,7 @@ async def join_tables(request: JoinTablesRequest):
 
 class SuggestJoinRequest(BaseModel):
     """AI联表建议请求"""
+
     table1_id: str
     table2_id: str
 
@@ -294,20 +314,20 @@ class SuggestJoinRequest(BaseModel):
 async def suggest_join(request: SuggestJoinRequest):
     """使用AI分析两表结构并建议联表配置"""
     from .join_service import suggest_join_config
-    
+
     loader = get_loader()
-    
+
     # 获取两表的loader
     loader1 = loader.get_table(request.table1_id)
     loader2 = loader.get_table(request.table2_id)
-    
+
     if not loader1 or not loader2:
         raise HTTPException(status_code=404, detail="指定的表不存在")
-    
+
     # 获取两表的summary
     table1_summary = loader1.get_summary()
     table2_summary = loader2.get_summary()
-    
+
     try:
         suggestion = suggest_join_config(table1_summary, table2_summary)
         return {
@@ -317,8 +337,7 @@ async def suggest_join(request: SuggestJoinRequest):
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
-        import traceback
-        print(f"[AI建议] 异常: {traceback.format_exc()}")
+        logger.exception("[AI建议] 异常")
         raise HTTPException(status_code=500, detail=f"AI分析失败: {str(e)}")
 
 
@@ -328,14 +347,14 @@ async def load_excel(request: LoadExcelRequest):
     try:
         loader = get_loader()
         table_id, structure = loader.add_table(request.file_path, request.sheet_name)
-        
+
         # 获取预览
         active_loader = loader.get_active_loader()
         preview = active_loader.get_preview() if active_loader else None
-        
+
         # 重置图以使用新的 Excel 数据
         reset_graph()
-        
+
         return LoadExcelResponse(
             success=True,
             message=f"成功加载 Excel 文件: {request.file_path}",
@@ -357,35 +376,35 @@ async def upload_excel(file: UploadFile = File(...), sheet_name: Optional[str] =
     """上传 Excel 文件（追加模式，会添加到多表管理器）"""
     if not file.filename:
         raise HTTPException(status_code=400, detail="未提供文件")
-    
+
     # 检查文件扩展名
     suffix = Path(file.filename).suffix.lower()
-    if suffix not in ['.xlsx', '.xls', '.xlsm']:
+    if suffix not in [".xlsx", ".xls", ".xlsm"]:
         raise HTTPException(status_code=400, detail=f"不支持的文件格式: {suffix}")
-    
+
     try:
         # 保存到临时文件
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             content = await file.read()
             tmp.write(content)
             tmp_path = tmp.name
-        
+
         # 加载 Excel（追加模式）
         loader = get_loader()
         table_id, structure = loader.add_table(tmp_path, sheet_name)
-        
+
         # 更新文件名（临时文件路径替换为原始文件名）
         table_info = loader.get_table_info(table_id)
         if table_info:
             table_info.filename = file.filename
-        
+
         # 获取预览
         active_loader = loader.get_active_loader()
         preview = active_loader.get_preview() if active_loader else None
-        
+
         # 重置图
         reset_graph()
-        
+
         return LoadExcelResponse(
             success=True,
             message=f"成功上传并加载 Excel 文件: {file.filename}",
@@ -396,7 +415,7 @@ async def upload_excel(file: UploadFile = File(...), sheet_name: Optional[str] =
         )
     except Exception as e:
         # 清理临时文件
-        if 'tmp_path' in locals():
+        if "tmp_path" in locals():
             try:
                 os.unlink(tmp_path)
             except:
@@ -408,40 +427,41 @@ async def upload_excel(file: UploadFile = File(...), sheet_name: Optional[str] =
 async def chat(request: ChatRequest):
     """与 Agent 对话（非流式）"""
     loader = get_loader()
-    
+
     if not loader.is_loaded:
         raise HTTPException(
-            status_code=400, 
-            detail="请先加载 Excel 文件（使用 /load 或 /upload 接口）"
+            status_code=400, detail="请先加载 Excel 文件（使用 /load 或 /upload 接口）"
         )
-    
+
     try:
         graph = get_graph()
-        
+
         # 构建输入
         inputs = {
             "messages": [HumanMessage(content=request.message)],
             "is_relevant": True,
         }
-        
+
         # 执行图
         result = graph.invoke(inputs)
-        
+
         # 提取响应
         messages = result.get("messages", [])
         response_text = ""
         tool_calls = []
-        
+
         for msg in messages:
             if isinstance(msg, AIMessage):
                 if msg.content:
                     response_text = msg.content
                 if msg.tool_calls:
-                    tool_calls.extend([
-                        {"name": tc["name"], "args": tc["args"]}
-                        for tc in msg.tool_calls
-                    ])
-        
+                    tool_calls.extend(
+                        [
+                            {"name": tc["name"], "args": tc["args"]}
+                            for tc in msg.tool_calls
+                        ]
+                    )
+
         return ChatResponse(
             success=True,
             response=response_text,
@@ -455,30 +475,27 @@ async def chat(request: ChatRequest):
 async def chat_stream(request: ChatRequest):
     """与 Agent 对话（流式输出）"""
     loader = get_loader()
-    
+
     if not loader.is_loaded:
-        raise HTTPException(
-            status_code=400, 
-            detail="请先加载 Excel 文件"
-        )
-    
+        raise HTTPException(status_code=400, detail="请先加载 Excel 文件")
+
     # 获取当前活跃表ID，用于前端标记消息
     active_table_id = loader.active_table_id
-    
+
     async def generate():
         # 先发送表ID信息
         yield f"data: {json_dumps({'type': 'table_info', 'table_id': active_table_id}, ensure_ascii=False)}\n\n"
-        
+
         async for event in stream_chat(request.message, request.history):
             yield f"data: {json_dumps(event, ensure_ascii=False)}\n\n"
-    
+
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-        }
+        },
     )
 
 
@@ -497,6 +514,7 @@ from .knowledge_base import get_knowledge_base, KnowledgeItem, reset_knowledge_b
 
 class KnowledgeEntryCreate(BaseModel):
     """创建知识条目请求"""
+
     content: str
     title: Optional[str] = None
     category: Optional[str] = "general"
@@ -507,6 +525,7 @@ class KnowledgeEntryCreate(BaseModel):
 
 class KnowledgeEntryUpdate(BaseModel):
     """更新知识条目请求"""
+
     content: Optional[str] = None
     title: Optional[str] = None
     category: Optional[str] = None
@@ -515,6 +534,7 @@ class KnowledgeEntryUpdate(BaseModel):
 
 class KnowledgeSearchRequest(BaseModel):
     """知识检索请求"""
+
     query: str
     top_k: Optional[int] = 3
 
@@ -525,14 +545,14 @@ async def list_knowledge(limit: int = 100, offset: int = 0):
     kb = get_knowledge_base()
     if not kb:
         return {"error": "知识库未启用", "entries": []}
-    
+
     entries = kb.list_entries(limit=limit, offset=offset)
     stats = kb.get_stats()
     return {
         "entries": entries,
         "total": stats["total_entries"],
         "limit": limit,
-        "offset": offset
+        "offset": offset,
     }
 
 
@@ -542,7 +562,7 @@ async def get_knowledge_stats():
     kb = get_knowledge_base()
     if not kb:
         return {"error": "知识库未启用"}
-    
+
     return kb.get_stats()
 
 
@@ -552,11 +572,11 @@ async def get_knowledge_entry(item_id: str):
     kb = get_knowledge_base()
     if not kb:
         return {"error": "知识库未启用"}
-    
+
     entry = kb.get_entry(item_id)
     if not entry:
         raise HTTPException(status_code=404, detail="知识条目不存在")
-    
+
     return {
         "id": entry.id,
         "title": entry.title,
@@ -565,7 +585,7 @@ async def get_knowledge_entry(item_id: str):
         "tags": entry.tags,
         "related_columns": entry.related_columns,
         "priority": entry.priority,
-        "source_file": entry.source_file
+        "source_file": entry.source_file,
     }
 
 
@@ -575,19 +595,20 @@ async def create_knowledge_entry(entry: KnowledgeEntryCreate):
     kb = get_knowledge_base()
     if not kb:
         return {"error": "知识库未启用"}
-    
+
     # 生成 ID
     import hashlib
     import time
+
     content_hash = hashlib.md5(entry.content.encode()).hexdigest()[:8]
     item_id = f"kb_api_{int(time.time())}_{content_hash}"
-    
+
     # 自动提取标题
     title = entry.title
     if not title:
         lines = entry.content.strip().split("\n")
         title = lines[0].lstrip("#").strip()[:50] if lines else "未命名"
-    
+
     item = KnowledgeItem(
         id=item_id,
         content=entry.content,
@@ -595,11 +616,11 @@ async def create_knowledge_entry(entry: KnowledgeEntryCreate):
         category=entry.category or "general",
         tags=entry.tags or [],
         related_columns=entry.related_columns or [],
-        priority=entry.priority or "normal"
+        priority=entry.priority or "normal",
     )
-    
+
     kb.add_entry(item)
-    
+
     return {"success": True, "id": item_id, "title": title}
 
 
@@ -609,18 +630,18 @@ async def update_knowledge_entry(item_id: str, entry: KnowledgeEntryUpdate):
     kb = get_knowledge_base()
     if not kb:
         return {"error": "知识库未启用"}
-    
+
     success = kb.update_entry(
         item_id=item_id,
         content=entry.content,
         title=entry.title,
         category=entry.category,
-        tags=entry.tags
+        tags=entry.tags,
     )
-    
+
     if not success:
         raise HTTPException(status_code=404, detail="知识条目不存在")
-    
+
     return {"success": True, "id": item_id}
 
 
@@ -630,11 +651,11 @@ async def delete_knowledge_entry(item_id: str):
     kb = get_knowledge_base()
     if not kb:
         return {"error": "知识库未启用"}
-    
+
     success = kb.delete_entry(item_id)
     if not success:
         raise HTTPException(status_code=404, detail="知识条目不存在或删除失败")
-    
+
     return {"success": True, "id": item_id}
 
 
@@ -644,21 +665,25 @@ async def search_knowledge(request: KnowledgeSearchRequest):
     kb = get_knowledge_base()
     if not kb:
         return {"error": "知识库未启用", "results": []}
-    
+
     items = kb.search(query=request.query, top_k=request.top_k)
-    
+
     return {
         "query": request.query,
         "results": [
             {
                 "id": item.id,
                 "title": item.title,
-                "content": item.content[:200] + "..." if len(item.content) > 200 else item.content,
+                "content": (
+                    item.content[:200] + "..."
+                    if len(item.content) > 200
+                    else item.content
+                ),
                 "category": item.category,
-                "tags": item.tags
+                "tags": item.tags,
             }
             for item in items
-        ]
+        ],
     }
 
 
@@ -668,29 +693,24 @@ async def upload_knowledge_file(file: UploadFile = File(...)):
     kb = get_knowledge_base()
     if not kb:
         return {"error": "知识库未启用"}
-    
+
     # 验证文件类型
-    if not file.filename or not file.filename.endswith(('.md', '.txt', '.markdown')):
+    if not file.filename or not file.filename.endswith((".md", ".txt", ".markdown")):
         raise HTTPException(status_code=400, detail="仅支持 .md, .txt, .markdown 文件")
-    
+
     # 保存文件到 knowledge 目录
     knowledge_dir = Path(kb.kb_config.knowledge_dir)
     knowledge_dir.mkdir(parents=True, exist_ok=True)
-    
+
     file_path = knowledge_dir / file.filename
     content = await file.read()
     file_path.write_bytes(content)
-    
+
     # 加载并索引
     item = kb.load_from_file(file_path)
     kb.add_entry(item)
-    
-    return {
-        "success": True,
-        "id": item.id,
-        "title": item.title,
-        "file": file.filename
-    }
+
+    return {"success": True, "id": item.id, "title": item.title, "file": file.filename}
 
 
 @app.post("/knowledge/index")
@@ -699,13 +719,13 @@ async def index_knowledge_directory():
     kb = get_knowledge_base()
     if not kb:
         return {"error": "知识库未启用"}
-    
+
     count = kb.index_directory()
-    
+
     return {
         "success": True,
         "indexed_count": count,
-        "message": f"成功索引 {count} 个知识文件"
+        "message": f"成功索引 {count} 个知识文件",
     }
 
 
@@ -719,10 +739,10 @@ async def reset_knowledge():
 def run_server():
     """运行服务器"""
     import uvicorn
+
     config = get_config()
     uvicorn.run(
         app,
         host=config.server.host,
         port=config.server.port,
     )
-

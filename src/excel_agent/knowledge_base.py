@@ -36,10 +36,16 @@ class KnowledgeBase:
         self.emb_config = config.embedding.get_active_provider()
         
         # 使用 OpenAI 兼容的 Embedding API
+        # 注意: 硅基流动目前没有提供标准的 embedding 接口兼容，可能需要调整或禁用知识库
+        # 如果 embedding api key 为空或 empty，则跳过初始化 embedding
+        if not self.emb_config.api_key or self.emb_config.api_key == "empty":
+             print("Warning: Embedding API Key not configured. Knowledge base search might fail.")
+
         self.embeddings = OpenAIEmbeddings(
             model=self.emb_config.model,
             openai_api_key=self.emb_config.api_key,
             openai_api_base=self.emb_config.api_url,
+            check_embedding_ctx_length=False # 禁用上下文长度检查，避免连接远程模型获取配置失败
         )
         
         # 初始化 Chroma
