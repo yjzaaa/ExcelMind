@@ -70,6 +70,7 @@ SYSTEM_PROMPT = """你是一个专业的 Excel 数据分析助手。你的任务
     -   "26财年" -> `Year = 'FY26'`
     -   "计划/预算" -> `Scenario = 'Budget1'`
     -   "HR费用" -> `Function = 'HR'`
+    - ""
 2.  **聚合逻辑**:
     -   目标是求总和 -> `SUM(Amount)` (假设金额列为 Amount)
 
@@ -141,17 +142,18 @@ INTENT_ANALYSIS_PROMPT = """你是一个专业的数据分析师。请结合用�
      - 示例: "Total HR cost", "Procurement budget vs actual", "IT费用有哪些", "26财年采购预算是多少".
      - 注意：即使涉及 "HR", "IT", "Procurement" 等功能部门，只要不是问“分摊给某BL”，都属于普通查询。
 2. **参数提取** (针对费用分摊场景):
-   - 如果是费用分摊场景，请尝试提取以下参数供后续工具使用：
+   - 如果是费用分摊场景，请尝试提取以下参数供后续工具使用(需要从：all_tables_field_values中验证提取的参数是否存在于对应的字段中)：
      - `target_bl` (目标业务线/部门，如 CT, DT)
      - `year` (财年，如 FY25)
      - `scenario` (场景，如 Actual, Budget)
      - `function` (功能/服务，如 ... Allocation)
+   -**注意**分摊场景中function字段值字符串必须包含"Allocation"
    - 如果不是费用分摊场景，请忽略此步骤。
 3. **逻辑提取**:
    - 提取特定术语的含义（例如："FY26"对应哪一列的什么值？）。
    - 提取计算规则（例如：如何计算"全年"？涉及哪些月份列？）。
 4. **字段映射**: 明确列名与业务概念的对应关系。
-
+5. **字段值示例**：all_tables_field_values
 ## 输出要求
 请严格以 JSON 格式输出分析报告，不要包含任何 Markdown 标记。格式如下：
 
@@ -169,8 +171,10 @@ INTENT_ANALYSIS_PROMPT = """你是一个专业的数据分析师。请结合用�
     "字段名": "含义"
   }}
 }}
-
-注意：参见 schemas.py 中的 IntentAnalysisResult 类定义。
+## 问题分析示例
+   针对26财年预算要分摊给413001的HR费用和25财年实际分摊给XP的HR费用相比，变化是怎么样？的问题
+   XP与413001分别是Table7中BL与CC的值，如果用户问题包含这两个值应该以 CC的值为准，因为BL与CC是一对多的包含关系
+   这个问题更准确的问法应该是6财年预算要分摊给413001的HR费用和25财年实际分摊给413001的HR费用相比，变化是怎么样
 
 注意：
 1. `intent_type` 必须是 "allocation" 或 "general_query" 之一。
@@ -185,7 +189,7 @@ SQL_GENERATION_PROMPT = """你是一个 Pandas/Python 专家。请根据用户�
 1. **分摊工具调用优先**:
    如果意图分析指出这是“费用分摊场景”或涉及“Table7/分摊”，你 **必须** 停止编写 Pandas 代码，而是返回一个 JSON 工具调用指令。
    格式如下：
-   {{"tool_call": "calculate_allocated_costs", "parameters": {{"target_bl": "...", "year": "...", "scenario": "...", "function": "..."}}}}
+   {{"tool_call": "calculate_allocated_costs", "parameters": {{"target": "...", "target_type": "...","year": "...", "scenario": "...", "function": "..."}}}}
    如果用户的需求是获取服务的内容，你必须返回一个 JSON 工具调用指令，格式如下(这些参数都是可选的根据用户需求填写)：
    {{"tool_call": "get_service_details", "parameters": {{"function": "..." ，"year": "..."，"scenario": "..." , ...........}}}}
 2. **禁止重新加载**:
@@ -196,7 +200,17 @@ SQL_GENERATION_PROMPT = """你是一个 Pandas/Python 专家。请根据用户�
    - 绝对不要在 Python 代码中直接调用 `calculate_allocated_costs(...)` 函数。
    - 如果需要分摊，必须且只能返回 JSON 格式的 `tool_call`。
    - 如果是普通对比分析，请使用 Pandas 的 `merge`, `groupby`, `query` 等原生方法实现。
-
+4. **字段值含义**
+   - {{ 
+        字段名：Function
+        字段值：xx Allocation
+        含义:被其他部门分摊的 xx部门的费用
+     }}
+5. **工具调用注意事项**
+   - 分摊、A给B的费用、b分给A的费用等涉及到多部门或业务先等的费用分摊场景必须使用calculate_allocated_costs
+   - 再生成calculate_allocated_costs 函数的参数前必须通过{all_tables_field_values}确认target 于target_type 之间的字段名于字段值的存在性关系
+   - target_type 必须是CC
+   - 在Table7表中BL与CC是一对多的关系，当从用户问题中分析到BL和CC都有时以CC为优先筛选字段
 ## 数据上下文
 {excel_summary}
 
@@ -211,6 +225,8 @@ SQL_GENERATION_PROMPT = """你是一个 Pandas/Python 专家。请根据用户�
 
 ## 错误修正（如果是重试）
 {error_context}
+## 表-字段名-字段值 字典
+{all_tables_field_values}
 
 ## 任务要求
 1. **深度理解业务语义**:
@@ -240,6 +256,21 @@ SQL_GENERATION_PROMPT = """你是一个 Pandas/Python 专家。请根据用户�
 4. **业务逻辑一致性**:
    - 严格遵循“业务逻辑分析”中的字段映射和过滤条件。
    - 如果用户没有指定年份，不要擅自添加年份筛选，除非业务逻辑暗示必须有默认年份（如当前财年）。
+## 用户问题示例
+   26财年预算要分摊给413001的HR费用和25财年实际分摊给XP的HR费用相比，变化是怎么样的？
+   因为413001是XP其中一个成本中心，因此以cc的值为优先
+   返回的格式
+   {{"tool_call": "compare_allocated_costs", "parameters": {{
+                        "target1": "413001",
+                        "target_type1": "CC",
+                        "year1": "FY26",
+                        "scenario1": "Budget1",
+                        "target2": "413001",
+                        "target_type2": "CC",
+                        "year2": "FY25",
+                        "scenario2": "Actual",
+                        "function": "HR Allocation"
+                      }}}}
 
 ## 输出示例
 - 简单筛选:
@@ -260,7 +291,8 @@ SQL_VALIDATION_PROMPT = """你是一个代码审查员。请检查以下 Pandas 
 
 ## 待验证代码
 {sql_query}
-
+## 表-字段名-字段值 字典
+{all_tables_field_values}
 ## 检查项
 1. **安全性**: 是否包含 import/eval/exec/delete 等禁止命令？
 2. **语法**: 是否符合 Python/Pandas 语法？
@@ -271,6 +303,8 @@ SQL_VALIDATION_PROMPT = """你是一个代码审查员。请检查以下 Pandas 
 4. **逻辑合理性**: 是否能回答用户问题？
 5. **工具调用检查**:
    - 如果代码是一个 JSON 格式的 `tool_call`，只要参数完整且合理，视为 VALID。
+5. **数据存在性验证**
+   - 涉及到字符串类型的数据必须从all_tables_field_values中获取字段值进行存在性验证以提高工具函数参数的准确性
 ## 输出格式
 如果通过，请直接输出 "VALID"。
 如果不通过，请输出 "INVALID: <具体错误原因>"。

@@ -50,6 +50,9 @@ def test_connection():
 
     print("\n✅ Connection test passed (invocation level).")
 
+def test_azure_connection():
+    # 验证配置加载结果
+    print(get_llm())
 
 if __name__ == "__main__":
-    test_connection()
+    test_azure_connection()

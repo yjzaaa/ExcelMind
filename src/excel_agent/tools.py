@@ -1022,7 +1022,8 @@ def _calculate_allocated_costs_impl(
     """内部实现：计算分摊费用（支持 BL 和 CC）"""
     if not target or not target_type or not year or not scenario:
         raise ValueError("target, target_type, year, scenario 不能为空")
-
+    if "Allocation" not in function:
+        return {"error": f"function 中必须含有 Allocation"}
     loader = get_loader()
     tables = loader.get_loaded_dataframes()
     cdb = tables.get("CostDataBase")
@@ -1055,6 +1056,7 @@ def _calculate_allocated_costs_impl(
     else:
         raise ValueError(f"不支持的目标类型: {target_type}，仅支持 BL 或 CC")
 
+    # logger.info(cdb_filtered)
     # 仅保留 CDB 中存在的 Key
     valid_keys = cdb_filtered["Key"].unique()
     t7_filtered = t7.query(t7_query).copy()
@@ -1074,6 +1076,8 @@ def _calculate_allocated_costs_impl(
 
     # 5. Calculate
     merged["Agg_Rate"] = merged["Agg_Rate"].fillna(0)
+    # aggregate_data=merged["Agg_Rate"]
+    # amount= merged["Amount"]
     merged["Allocated_Amount"] = merged["Amount"] * merged["Agg_Rate"]
 
     # 6. Aggregate
@@ -1111,7 +1115,7 @@ def calculate_allocated_costs(
     """计算特定目标 (BL 或 CC) 在指定年份和场景下的分摊费用。
 
     Args:
-        target: 目标名称 (如 "CB" 或 "413001")
+        target: 目标名称 (如 "CT" 或 "413001")
         target_type: 目标类型 ("BL" 或 "CC")
         year: 年份 (如 "FY26")
         scenario: 场景 (如 "Budget1")
@@ -1120,6 +1124,8 @@ def calculate_allocated_costs(
     Returns:
         按月汇总的分摊费用结果
     """
+    if "Allocation" not in function:
+        return {"error": f"function 中必须含有 Allocation"}
     try:
         df = _calculate_allocated_costs_impl(
             target, target_type, year, scenario, function
@@ -1131,43 +1137,6 @@ def calculate_allocated_costs(
     except Exception as e:
         return {"error": f"分摊计算出错: {str(e)}"}
 
-
-def _compare_allocated_costs_impl(
-    target1: str,
-    target_type1: str,
-    year1: str,
-    scenario1: str,
-    target2: str,
-    target_type2: str,
-    year2: str,
-    scenario2: str,
-    function: Optional[str] = None,
-) -> pd.DataFrame:
-    """内部实现：对比分摊结果"""
-
-    # 分别计算两个场景的分摊
-    df1 = _calculate_allocated_costs_impl(
-        target1, target_type1, year1, scenario1, function
-    )
-    df2 = _calculate_allocated_costs_impl(
-        target2, target_type2, year2, scenario2, function
-    )
-
-    amt1 = df1["Allocated_Amount"].sum()
-    amt2 = df2["Allocated_Amount"].sum()
-
-    diff = amt1 - amt2
-    pct = (diff / amt2 * 100) if amt2 != 0 else 0
-
-    return pd.DataFrame(
-        {
-            "Metric": ["Allocated Amount"],
-            f"{year1} {scenario1} ({target1})": [amt1],
-            f"{year2} {scenario2} ({target2})": [amt2],
-            "Difference": [diff],
-            "Pct_Change": [pct],
-        }
-    )
 
 
 @tool
@@ -1200,18 +1169,32 @@ def compare_allocated_costs(
         对比结果表
     """
     try:
-        df = _compare_allocated_costs_impl(
-            target1,
-            target_type1,
-            year1,
-            scenario1,
-            target2,
-            target_type2,
-            year2,
-            scenario2,
-            function,
+        if target1 !=target2:
+            return {"error": f"target1 必须与 target2相同"}
+            # 分别计算两个场景的分摊
+        df1 = _calculate_allocated_costs_impl(
+            target1, target_type1, year1, scenario1, function
         )
-        return _df_to_result(df)
+        df2 = _calculate_allocated_costs_impl(
+            target2, target_type2, year2, scenario2, function
+        )
+
+        amt1 = df1["Allocated_Amount"].sum()
+        amt2 = df2["Allocated_Amount"].sum()
+
+        diff = amt1 - amt2
+        pct = (diff / amt2 * 100) if amt2 != 0 else 0
+
+        return pd.DataFrame(
+            {
+                "Metric": ["Allocated Amount"],
+                f"{year1} {scenario1} ({target1})": [amt1],
+                f"{year2} {scenario2} ({target2})": [amt2],
+                "Difference": [diff],
+                "Pct_Change": [pct],
+            }
+        )
+
     except Exception as e:
         return {"error": f"分摊对比出错: {str(e)}"}
 
@@ -1398,7 +1381,7 @@ def compare_scenarios(
         return {"error": f"场景对比出错: {str(e)}"}
 
 
-@tool
+# @tool
 def execute_pandas_query(query: str, limit: int = 100) -> Dict[str, Any]:
     """执行 Pandas 查询。
 
@@ -1542,11 +1525,11 @@ ALL_TOOLS = [
     generate_chart,
     execute_pandas_query,
     calculate_allocated_costs,  # 新增工具
-    calculate_trend,
+    # calculate_trend,
     analyze_cost_composition,
     compare_scenarios,
     compare_allocated_costs,
 ]
-from .business_tools import get_service_details
+# from .business_tools import get_service_details
 
-ALL_TOOLS.append(get_service_details)
+# ALL_TOOLS.append(get_service_details)

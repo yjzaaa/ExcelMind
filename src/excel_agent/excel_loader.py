@@ -1,6 +1,6 @@
 """Excel 加载与管理模块 - 支持多表管理"""
 
-import uuid
+import uuid,json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +10,12 @@ import pandas as pd
 
 from .config import get_config
 
-
+# ============== 外部配置：字段名白名单 ==============
+# 在此配置需要保留所有类型值的字段名，可根据需求随时修改
+FIELD_WHITELIST = [
+    "CC",
+]
+# ===================================================
 @dataclass
 class TableInfo:
     """表的元信息"""
@@ -520,7 +525,135 @@ class MultiExcelLoader:
         if loader:
             return loader.dataframe
         raise ValueError("未加载 Excel 文件")
-
+    # ===================== 新增核心方法 =====================
+    def get_all_tables_field_values_json(self, 
+                                         ensure_ascii: bool = False, 
+                                         indent: int = 4, 
+                                         keep_order: bool = True,
+                                         field_whitelist: List[str] = None  # 可选参数，支持运行时覆盖外部配置
+                                         ) -> str:
+        """
+        获取当前对象中所有表的「表-字段-字段值」层级结构的 JSON 格式字符串
+        新增：1. 字符串字段值去除首尾空白 2. 字段值列表去重（可选保留首次出现顺序）
+        
+        Args:
+            ensure_ascii: 是否确保 ASCII 编码（False 支持中文显示）
+            indent: JSON 格式化缩进空格数
+            keep_order: 是否保留字段值的首次出现顺序（True=保留，False=不保留，高效）
+        
+        Returns:
+            结构化的 JSON 字符串
+        """
+          # 1. 构建层级化的 Python 字典（表->字段->字段值）
+        all_tables_data = {}
+        # 初始化白名单：优先使用方法传入值，无则使用外部全局配置
+        target_whitelist = field_whitelist or FIELD_WHITELIST
+        
+        for table_id, loader in self._tables.items():
+            # 跳过未成功加载数据的表
+            if not loader or not loader.is_loaded:
+                continue
+            
+            # 获取表的元信息，用于构建表的标识
+            table_info = self.get_table_info(table_id)
+            if not table_info:
+                continue
+            
+            # 表的唯一标识（组合 ID、文件名、工作表名，提高可读性）
+            table_identifier = f"{table_info.filename}（ID：{table_id}，Sheet：{table_info.sheet_name}）"
+            
+            # 获取表的 DataFrame 并转换为字典格式（方便提取字段和值）
+            df = loader.dataframe
+            # 处理 pandas 中的特殊类型（NaT、NaN 等），转为 JSON 可序列化格式
+            df_clean = df.where(pd.notna(df), None)  # NaN/NaT 替换为 None
+            
+            # 构建字段-字段值结构：仅保留字符串类型，去空白+去重
+            field_values = {}
+            for column in df_clean.columns:
+                # 提取该列所有值
+                column_values = df_clean[column].tolist()
+                processed_values = []
+                
+                # 步骤1：根据字段是否在白名单，执行不同的筛选/保留逻辑
+                if column in target_whitelist:
+                    # 分支1：白名单字段 - 保留所有类型值，仅对字符串做去空白处理
+                    for val in column_values:
+                        # 对字符串类型：去首尾空白
+                        if isinstance(val, str):
+                            stripped_val = val.strip()
+                            # 保留去空白后的字符串（包括空字符串，如需过滤可添加判断）
+                            processed_values.append(stripped_val)
+                        # 对时间类型：格式化为 ISO 字符串（保证 JSON 可序列化）
+                        elif isinstance(val, pd.Timestamp) or isinstance(val, datetime):
+                            processed_values.append(val.isoformat())
+                        # 其他所有类型：直接保留（数字、布尔、None 等）
+                        else:
+                            processed_values.append(val)
+                else:
+                    # 分支2：非白名单字段 - 仅保留字符串类型值，且去空白
+                    for val in column_values:
+                        if isinstance(val, str):
+                            stripped_val = val.strip()
+                            # 可选：过滤去空白后的空字符串
+                            if stripped_val:
+                                processed_values.append(stripped_val)
+                
+                # 步骤2：对处理后的列表进行去重（兼容所有类型）
+                deduplicated_values = []
+                if keep_order:
+                    # 保留首次出现顺序的去重（推荐，兼容不可哈希类型）
+                    seen = set()
+                    for val in processed_values:
+                        # 处理不可哈希类型（如列表），转为字符串判断唯一性
+                        try:
+                            # 可哈希类型直接使用，不可哈希类型转为字符串
+                            val_hashable = val if isinstance(val, (int, float, str, bool, None.__class__)) else str(val)
+                        except:
+                            val_hashable = str(val)
+                        
+                        if val_hashable not in seen:
+                            seen.add(val_hashable)
+                            deduplicated_values.append(val)
+                else:
+                    # 高效去重（不保留顺序），兼容不可哈希类型降级处理
+                    try:
+                        deduplicated_values = list(set(processed_values))
+                    except:
+                        seen = set()
+                        for val in processed_values:
+                            val_hashable = str(val)
+                            if val_hashable not in seen:
+                                seen.add(val_hashable)
+                                deduplicated_values.append(val)
+                
+                # 存入最终处理结果
+                field_values[column] = deduplicated_values
+            
+            # 将当前表的数据存入总字典
+            all_tables_data[table_identifier] = {
+                "table_meta": {
+                    "table_id": table_id,
+                    "filename": table_info.filename,
+                    "sheet_name": table_info.sheet_name,
+                    "total_rows": table_info.total_rows,
+                    "total_columns": table_info.total_columns,
+                    "is_active": table_id == self._active_table_id,
+                    "is_joined": table_info.is_joined
+                },
+                "field_values": field_values
+            }
+        
+        # 2. 将 Python 字典转换为 JSON 字符串
+        try:
+            json_str = json.dumps(
+                all_tables_data,
+                ensure_ascii=ensure_ascii,  # 支持中文（False 时中文不转义）
+                indent=indent,              # 格式化缩进，提高可读性
+                default=str                 # 兜底处理剩余不可序列化对象
+            )
+            return json_str
+        except Exception as e:
+            raise Exception(f"JSON 序列化失败：{str(e)}") from e
 
 # 全局实例 - 使用多表管理器
 _loader: Optional[MultiExcelLoader] = None

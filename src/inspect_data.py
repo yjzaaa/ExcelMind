@@ -6,7 +6,7 @@ setup_logging()
 logger = get_logger("inspector")
 
 def inspect():
-    file_path = r"D:\AI_Python\AI2\AI2\back_end_code\Data\Function cost allocation analysis to IT 20260104.xlsx"
+    file_path = r"D:\FI\FI\back_end_code\Data\Function cost allocation analysis to IT 20260104.xlsx"
     loader = get_loader()
     loader.add_table(file_path, sheet_name="CostDataBase")
     

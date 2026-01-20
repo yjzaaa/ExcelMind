@@ -6,7 +6,7 @@ from langchain_core.messages.base import BaseMessage
 import pandas as pd
 
 import operator
-import json
+import json,os
 from typing import Annotated, Any, Dict, List, Literal, TypedDict, Optional
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -31,6 +31,7 @@ from .business_tools import get_service_details
 from .knowledge_base import get_knowledge_base, format_knowledge_context
 from .trace_store import TraceStore
 from .cache import get_intent_cache, set_intent_cache, get_rag_cache, set_rag_cache
+from langchain.chat_models import init_chat_model
 
 logger = get_logger("excel_agent.graph")
 
@@ -48,7 +49,7 @@ class AgentState(TypedDict):
     # 意图分析
     intent_analysis: Annotated[Any, lambda x, y: y]  # Optional[IntentAnalysisResult]
     knowledge_context: Annotated[str, lambda x, y: y]  # RAG 检索到的知识上下文
-
+    all_tables_field_values:Annotated[str, lambda x, y: y]
     # SQL 流程状态
     user_query: Annotated[Optional[str], lambda x, y: y]
     sql_query: Annotated[Optional[str], lambda x, y: y]
@@ -84,6 +85,16 @@ def get_llm():
     """获取 LLM 实例"""
     config = get_config()
     provider = config.model.get_active_provider()
+    return init_chat_model(
+                model=os.getenv("OPENAI_MODEL_ID"),
+                model_provider=os.getenv("OPENAI_MODEL_PROVIDER"),
+                base_url=os.getenv("OPENAI_BASE_URL"),
+                api_version=os.getenv("OPENAI_API_VERSION"),
+                api_key=os.getenv("OPENAI_API_KEY"),
+                temperature=0.5
+            )
+
+
     return ChatOpenAI(
         model=provider.model_name,
         api_key=provider.api_key,
@@ -114,6 +125,13 @@ def load_context_node(state: AgentState) -> AgentState:
     if not state.get("trace_id"):
         state["trace_id"] = str(uuid.uuid4())
 
+
+
+    all_tables_field_values=loader.get_all_tables_field_values_json()
+    knowledge_context=loader.get_active_loader().business_logic_context
+    # 保存知识上下文到状态中
+    state["knowledge_context"] = knowledge_context
+    state["all_tables_field_values"]=all_tables_field_values
     state["user_query"] = user_query
     state["retry_count"] = retry_count
     state["error_message"] = state.get("error_message", "")  # 继承之前的错误（如果有）
@@ -134,53 +152,9 @@ def analyze_intent_node(state: AgentState) -> AgentState:
         excel_summary = (
             loader.get_summary() if loader.is_loaded else "未加载 Excel 文件"
         )
-        # 生成上下文哈希（用于缓存 Key），基于 Excel 文件名或摘要的简略哈希
-        context_hash = str(hash(excel_summary[:100]))
-
         user_query = state.get("user_query", "")
         error_context = state.get("error_message", "")
-
-        # 0. 检查意图缓存 (仅在无错误上下文时使用缓存)
-        if not error_context:
-            cached_intent = get_intent_cache(user_query, context_hash)
-            if cached_intent:
-                logger.info(f"✨ 命中意图缓存: {user_query}")
-                state["intent_analysis"] = cached_intent["intent_analysis"]
-                state["knowledge_context"] = cached_intent.get(
-                    "knowledge_context", "暂无相关知识参考。"
-                )
-                # 如果缓存中包含 SQL，也可以直接复用，但这里我们只复用 Intent Analysis
-                return state
-
-        # RAG: 检索相关知识
-        knowledge_context = "暂无相关知识参考。"
-        try:
-            # 1. 检查 RAG 缓存
-            cached_rag = get_rag_cache(user_query)
-            if cached_rag:
-                knowledge_context = cached_rag
-                # logger.info("✨ 命中 RAG 缓存")
-            else:
-                kb = get_knowledge_base()
-                if kb:
-                    # 索引知识库目录（如果尚未索引）
-                    if kb.get_stats()["total_entries"] == 0:
-                        kb.index_directory()
-
-                    relevant_knowledge = kb.search(query=user_query)
-                    if relevant_knowledge:
-                        knowledge_context = format_knowledge_context(relevant_knowledge)
-                        # logger.info(f"RAG retrieved {len(relevant_knowledge)} items")
-
-                    # 写入 RAG 缓存
-                    set_rag_cache(user_query, knowledge_context)
-
-        except Exception as e:
-            logger.warning(f"RAG search failed: {e}")
-
-        # 保存知识上下文到状态中
-        state["knowledge_context"] = knowledge_context
-
+       
         # 如果有错误上下文，且错误与参数缺失有关，提示 LLM 重新仔细提取参数
         additional_instruction = ""
         if error_context and (
@@ -195,23 +169,24 @@ def analyze_intent_node(state: AgentState) -> AgentState:
             INTENT_ANALYSIS_PROMPT.format(
                 excel_summary=excel_summary,
                 user_query=user_query,
-                knowledge_context=knowledge_context,
+                knowledge_context=state["knowledge_context"],
+                all_tables_field_values=state["all_tables_field_values"]
             )
             + additional_instruction
         )
 
         llm = get_llm()
-        structured_llm = llm.with_structured_output(IntentAnalysisResult)
-        response = structured_llm.invoke([HumanMessage(content=prompt)])
+        # structured_llm = llm.with_structured_output(IntentAnalysisResult)
+        response = llm.invoke([HumanMessage(content=prompt)])
         state["intent_analysis"] = response
 
         # 写入意图缓存 (仅在成功且无错误时)
-        if not error_context:
-            set_intent_cache(
-                user_query,
-                {"intent_analysis": response, "knowledge_context": knowledge_context},
-                context_hash,
-            )
+        # if not error_context:
+        #     set_intent_cache(
+        #         user_query,
+        #         {"intent_analysis": response, "knowledge_context": knowledge_context},
+        #         # context_hash,
+        #     )
 
         return state
     except Exception as e:
@@ -220,168 +195,182 @@ def analyze_intent_node(state: AgentState) -> AgentState:
 
 
 def generate_sql_node(state: AgentState) -> AgentState:
-    """SQL 生成节点 (实际生成 Pandas 代码)"""
-    loader = get_loader()
-    excel_summary = loader.get_summary() if loader.is_loaded else "未加载 Excel 文件"
+    try :
+        """SQL 生成节点 (实际生成 Pandas 代码)"""
+        loader = get_loader()
+        excel_summary = loader.get_summary() if loader.is_loaded else "未加载 Excel 文件"
 
-    user_query = state["user_query"]
-    intent_analysis = state.get("intent_analysis", "")
-    knowledge_context = state.get("knowledge_context", "暂无相关知识参考。")
+        user_query = state["user_query"]
+        intent_analysis = state.get("intent_analysis", "")
+        knowledge_context = state.get("knowledge_context", "暂无相关知识参考。")
 
-    # 如果是 Pydantic 对象，转换为 JSON 字符串以便在 prompt 中使用
-    if isinstance(intent_analysis, IntentAnalysisResult):
-        intent_analysis = intent_analysis.model_dump_json(indent=2)
+        # 如果是 Pydantic 对象，转换为 JSON 字符串以便在 prompt 中使用
+        if isinstance(intent_analysis, IntentAnalysisResult):
+            intent_analysis = intent_analysis.model_dump_json(indent=2)
 
-    error_context = state.get("error_message", "")
+        error_context = state.get("error_message", "")
 
-    if error_context:
-        error_context = (
-            f"上一次尝试失败，错误信息：{error_context}。请根据错误修正代码。"
+        if error_context:
+            error_context = (
+                f"上一次尝试失败，错误信息：{error_context}。请根据错误修正代码。"
+            )
+
+        # 检查是否应该直接调用 calculate_allocated_costs 工具
+        # 虽然 prompt 已经鼓励 LLM 使用工具，但我们可以通过特定的提示强化这一点
+        # 或者，我们可以在这里通过规则判断：如果用户意图明确是计算分摊，我们可以尝试直接生成工具调用代码
+
+        all_tables_field_values=state["all_tables_field_values"]
+        prompt = SQL_GENERATION_PROMPT.format(
+            excel_summary=excel_summary,
+            knowledge_context=knowledge_context,
+            intent_analysis=intent_analysis,
+            user_query=user_query,
+            error_context=error_context,
+            all_tables_field_values=all_tables_field_values
         )
+        # logger.info(f"SQL prompt: {prompt}")
+        llm = get_llm()
 
-    # 检查是否应该直接调用 calculate_allocated_costs 工具
-    # 虽然 prompt 已经鼓励 LLM 使用工具，但我们可以通过特定的提示强化这一点
-    # 或者，我们可以在这里通过规则判断：如果用户意图明确是计算分摊，我们可以尝试直接生成工具调用代码
+        # 获取所有可用的工具定义（为了让 LLM 知道有 get_service_details 等工具）
+        tools = ALL_TOOLS
 
-    prompt = SQL_GENERATION_PROMPT.format(
-        excel_summary=excel_summary,
-        knowledge_context=knowledge_context,
-        intent_analysis=intent_analysis,
-        user_query=user_query,
-        error_context=error_context,
-    )
-    logger.info(f"SQL prompt: {prompt}")
-    llm = get_llm()
+        # 使用 bind_tools 将工具信息传递给 LLM，允许它选择调用工具而不是生成代码
+        llm_with_tools = llm.bind_tools(tools)
 
-    # 获取所有可用的工具定义（为了让 LLM 知道有 get_service_details 等工具）
-    tools = ALL_TOOLS
+        # 使用 invoke 生成 SQL 或 工具调用
+        response = llm_with_tools.invoke([HumanMessage(content=prompt)])
 
-    # 使用 bind_tools 将工具信息传递给 LLM，允许它选择调用工具而不是生成代码
-    llm_with_tools = llm.bind_tools(tools)
+        # 检查是否有 tool_calls
+        if response.tool_calls:
+            # 如果 LLM 决定调用工具，我们将其转换为 JSON 格式的 tool_call 指令，
+            # 以便 validate_sql_node 和 execute_sql_node 可以处理它。
+            # 目前我们的架构期望 generate_sql_node 返回字符串（SQL 或 JSON 指令）。
+            tool_call = response.tool_calls[0]
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
 
-    # 使用 invoke 生成 SQL 或 工具调用
-    response = llm_with_tools.invoke([HumanMessage(content=prompt)])
+            # 构造 JSON 指令字符串
+            import json
 
-    # 检查是否有 tool_calls
-    if response.tool_calls:
-        # 如果 LLM 决定调用工具，我们将其转换为 JSON 格式的 tool_call 指令，
-        # 以便 validate_sql_node 和 execute_sql_node 可以处理它。
-        # 目前我们的架构期望 generate_sql_node 返回字符串（SQL 或 JSON 指令）。
-        tool_call = response.tool_calls[0]
-        tool_name = tool_call["name"]
-        tool_args = tool_call["args"]
+            sql = json.dumps(
+                {"tool_call": tool_name, "parameters": tool_args}, ensure_ascii=False
+            )
+            # logger.info(f"LLM 选择调用工具: {tool_name}, 参数: {tool_args}")
+        else:
+            # 清理 markdown 标记
+            sql = response.content.replace("```python", "").replace("```", "").strip()
 
-        # 构造 JSON 指令字符串
-        import json
-
-        sql = json.dumps(
-            {"tool_call": tool_name, "parameters": tool_args}, ensure_ascii=False
-        )
-        # logger.info(f"LLM 选择调用工具: {tool_name}, 参数: {tool_args}")
-    else:
-        # 清理 markdown 标记
-        sql = response.content.replace("```python", "").replace("```", "").strip()
-
-    # logger.info(f"生成的 Pandas 代码: {sql}")
-    state["sql_query"] = sql
-    state["retry_count"] = state["retry_count"] + 1
-    return state
+        # logger.info(f"生成的 Pandas 代码: {sql}")
+        state["sql_query"] = sql
+        state["retry_count"] = state["retry_count"] + 1
+        return state
+    except Exception as e:
+        state["error_message"] = f"enerate_sql节点执行错误。错误详情：{str(e)}"
+        return state
+    
 
 
 def validate_sql_node(state: AgentState) -> AgentState:
-    """SQL 验证节点（适配 Pandas SQL 只读查询规则，精准校验）"""
-    sql = state["sql_query"]
-    # 空SQL直接校验失败
-    if not sql or sql.strip() == "":
-        state["error_message"] = "代码验证失败: SQL查询语句不能为空。"
-        state["sql_valid"] = False
-        return state
-
-    # 1. 【核心】Pandas SQL 专属静态安全+语法基础校验
-    # ✅ 只保留Pandas SQL中真正危险/非法的关键字，全部是【写入/执行类】，Pandas SQL只支持SELECT查询
-    forbidden_keywords = [
-        "delete",
-        "drop",
-        "insert",
-        "update",
-        "replace",
-        "alter",
-        "create",
-        "truncate",
-        "exec(",
-        "eval(",
-        "__import__",
-        "open(",
-        "write(",
-        "system(",
-        "os.",
-        "sys.",
-    ]
-    # 统一转大写，忽略大小写匹配（如 Delete/DELETE 都拦截）
-    sql_upper = sql.upper()
-    for keyword in forbidden_keywords:
-        # 关键字匹配区分大小写（如os.是危险的，Os.也拦截，SELECT是正常的）
-        if keyword in sql:
-            state["error_message"] = (
-                f"代码验证失败: 包含禁止的关键字 '{keyword}'。"
-                "请仅使用 Pandas 只读查询语法(SELECT)，禁止使用数据修改/文件读写/系统执行类语法。"
-            )
+    try:
+        """SQL 验证节点（适配 Pandas SQL 只读查询规则，精准校验）"""
+        sql = state["sql_query"]
+        # 空SQL直接校验失败
+        if not sql or sql.strip() == "":
+            state["error_message"] = "代码验证失败: SQL查询语句不能为空。"
             state["sql_valid"] = False
             return state
 
-    # 2. 强制校验：Pandas SQL 只支持 SELECT 开头的查询语句（核心规则）
-    # 已移除 SELECT 开头检查，因为 Pandas 查询是 Python 代码而非标准 SQL
-    pass
+        # 1. 【核心】Pandas SQL 专属静态安全+语法基础校验
+        # ✅ 只保留Pandas SQL中真正危险/非法的关键字，全部是【写入/执行类】，Pandas SQL只支持SELECT查询
+        forbidden_keywords = [
+            "delete",
+            "drop",
+            "insert",
+            "update",
+            "replace",
+            "alter",
+            "create",
+            "truncate",
+            "exec(",
+            "eval(",
+            "__import__",
+            "open(",
+            "write(",
+            "system(",
+            "os.",
+            "sys.",
+        ]
+        # 统一转大写，忽略大小写匹配（如 Delete/DELETE 都拦截）
+        sql_upper = sql.upper()
+        for keyword in forbidden_keywords:
+            # 关键字匹配区分大小写（如os.是危险的，Os.也拦截，SELECT是正常的）
+            if keyword in sql:
+                state["error_message"] = (
+                    f"代码验证失败: 包含禁止的关键字 '{keyword}'。"
+                    "请仅使用 Pandas 只读查询语法(SELECT)，禁止使用数据修改/文件读写/系统执行类语法。"
+                )
+                state["sql_valid"] = False
+                return state
 
-    # 3. 表结构一致性硬校验（必须有，最核心的报错来源）
-    loader = get_loader()
-    active_loader = loader.get_active_loader()
-    structure = (
-        active_loader.get_structure()
-        if active_loader and active_loader.is_loaded
-        else {}
-    )
-    # 无表结构则跳过结构校验（避免无数据时报错）
-    if not structure or "columns" not in structure or len(structure["columns"]) == 0:
+        # 2. 强制校验：Pandas SQL 只支持 SELECT 开头的查询语句（核心规则）
+        # 已移除 SELECT 开头检查，因为 Pandas 查询是 Python 代码而非标准 SQL
+        pass
+
+        # 3. 表结构一致性硬校验（必须有，最核心的报错来源）
+        loader = get_loader()
+        active_loader = loader.get_active_loader()
+        structure = (
+            active_loader.get_structure()
+            if active_loader and active_loader.is_loaded
+            else {}
+        )
+        # 无表结构则跳过结构校验（避免无数据时报错）
+        if not structure or "columns" not in structure or len(structure["columns"]) == 0:
+            state["sql_valid"] = True
+            state["error_message"] = ""
+            return state
+
+        # 提取当前数据表的【所有合法列名】和【字段类型】
+        valid_column_names = [col["name"].lower() for col in structure.get("columns", [])]
+        simple_columns = [
+            f"{col['name']} ({col['dtype']})" for col in structure.get("columns", [])
+        ]
+        columns_info = f"Columns: {simple_columns}"
+        all_tables_field_values=state["all_tables_field_values"]
+
+        # 4. LLM 精准校验（优化Prompt，贴合Pandas SQL规则，让校验结果更准确）
+        # ✅ 改造Prompt核心：明确告知LLM是【Pandas SQL】+【仅校验SELECT语法】+【校验列名合法性】
+        prompt = SQL_VALIDATION_PROMPT.format(
+            columns_info=columns_info,
+            sql_query=sql,
+            all_tables_field_values=all_tables_field_values,
+            extra_rule="""
+            重要校验规则：
+            1. 该SQL是执行在Pandas DataFrame上的Pandas SQL语句，仅支持标准SELECT查询语法；
+            2. 必须校验SQL中使用的所有列名是否存在于上述Columns列表中，列名大小写不敏感；
+            3. 语法错误/列名错误/使用了非SELECT的语法，均判定为INVALID；
+            4. 只返回【VALID】或【INVALID + 具体原因】，不要返回多余内容。
+            """,
+        )
+
+        llm = get_llm()
+        response = llm.invoke([HumanMessage(content=prompt)])
+        result = response.content.strip().upper()
+
+        # 5. LLM校验结果判定
+        if "INVALID" in result:
+            state["error_message"] = f"代码验证失败: {response.content.strip()}"
+            state["sql_valid"] = False
+            return state
+
+        # 所有校验通过
         state["sql_valid"] = True
         state["error_message"] = ""
         return state
-
-    # 提取当前数据表的【所有合法列名】和【字段类型】
-    valid_column_names = [col["name"].lower() for col in structure.get("columns", [])]
-    simple_columns = [
-        f"{col['name']} ({col['dtype']})" for col in structure.get("columns", [])
-    ]
-    columns_info = f"Columns: {simple_columns}"
-
-    # 4. LLM 精准校验（优化Prompt，贴合Pandas SQL规则，让校验结果更准确）
-    # ✅ 改造Prompt核心：明确告知LLM是【Pandas SQL】+【仅校验SELECT语法】+【校验列名合法性】
-    prompt = SQL_VALIDATION_PROMPT.format(
-        columns_info=columns_info,
-        sql_query=sql,
-        extra_rule="""
-        重要校验规则：
-        1. 该SQL是执行在Pandas DataFrame上的Pandas SQL语句，仅支持标准SELECT查询语法；
-        2. 必须校验SQL中使用的所有列名是否存在于上述Columns列表中，列名大小写不敏感；
-        3. 语法错误/列名错误/使用了非SELECT的语法，均判定为INVALID；
-        4. 只返回【VALID】或【INVALID + 具体原因】，不要返回多余内容。
-        """,
-    )
-
-    llm = get_llm()
-    response = llm.invoke([HumanMessage(content=prompt)])
-    result = response.content.strip().upper()
-
-    # 5. LLM校验结果判定
-    if "INVALID" in result:
-        state["error_message"] = f"代码验证失败: {response.content.strip()}"
-        state["sql_valid"] = False
+    except Exception as e:
+        state["error_message"] = f"validate_sql_node节点执行错误。错误详情：{str(e)}"
         return state
-
-    # 所有校验通过
-    state["sql_valid"] = True
-    state["error_message"] = ""
-    return state
+    
 
 
 def execute_sql_node(state: AgentState) -> AgentState:
@@ -441,83 +430,6 @@ def execute_sql_node(state: AgentState) -> AgentState:
     state["error_message"] = ""
     return state  # 清除错误
 
-
-def allocate_costs_node(state: AgentState) -> AgentState:
-    """分摊计算节点 (直接调用 calculate_allocated_costs 工具)"""
-    intent_analysis = state.get("intent_analysis", "")
-
-    params = {}
-
-    # 优先从 Pydantic 对象提取
-    if isinstance(intent_analysis, IntentAnalysisResult):
-        if intent_analysis.parameters:
-            params = intent_analysis.parameters.model_dump()
-    else:
-        # 从意图分析中提取参数 (旧逻辑，针对字符串)
-        import re
-
-        try:
-            # 匹配 key=value 模式
-            # 使用非贪婪匹配，直到遇到逗号、分号或换行符
-            matches = re.findall(
-                r"(target_bl|year|scenario|function)\s*[:=]\s*(.+?)(?:[,;\n]|$)",
-                str(intent_analysis),
-                re.IGNORECASE,
-            )
-            if matches:
-                for key, value in matches:
-                    # 去除可能的引号、括号、反引号和空白
-                    clean_value = (
-                        value.strip()
-                        .strip("'")
-                        .strip('"')
-                        .strip("`")
-                        .strip(")")
-                        .strip("(")
-                        .strip()
-                    )
-                    params[key] = clean_value
-        except Exception as e:
-            logger.warning(f"参数提取正则解析失败: {e}")
-
-    try:
-        # logger.info(f"Allocation Node 提取参数: {params}")
-
-        if (
-            params
-            and "target_bl" in params
-            and "year" in params
-            and "scenario" in params
-            and "function" in params
-        ):
-            result = calculate_allocated_costs.invoke(params)
-            if isinstance(result, dict) and "error" in result and result["error"]:
-                state["execution_result"] = str(result)
-                state["error_message"] = f"分摊计算出错: {result['error']}"
-                state["retry_count"] = state["retry_count"] + 1
-                return state
-
-            result_str = str(result)
-            state["execution_result"] = result_str
-            state["error_message"] = ""
-            state["retry_count"] = 0
-            return state
-        else:
-            state["error_message"] = (
-                f"参数提取不完整: {params}. 需要 target_bl, year, scenario, function."
-            )
-            state["execution_result"] = "参数缺失"
-            state["retry_count"] = state["retry_count"] + 1
-            return state
-
-    except Exception as e:
-        # logger.error(f"Allocation Node 出错: {e}")
-        state["error_message"] = f"分摊节点内部错误: {e}"
-        state["execution_result"] = "Error"
-        state["retry_count"] = state["retry_count"] + 1
-        return state
-
-
 def refine_answer_node(state: AgentState) -> AgentState:
     """生成最终回答节点"""
     user_query = state["user_query"]
@@ -559,6 +471,7 @@ def route_after_validation(
 
     if state["retry_count"] >= 5:
         # 重试次数过多，直接去生成回答（报告错误）
+        logger.info(f'route_after_validation retry_count{state["retry_count"]}')
         return "refine_answer"
 
     return "generate_sql"
@@ -570,17 +483,12 @@ def route_after_execution(
     """执行后的路由"""
     error = state.get("error_message", "")
     if not error:
+        logger.info(f' route_after_execution not error retry_count{state["retry_count"]}')
         return "refine_answer"
 
     if state["retry_count"] >= 5:
+        logger.info(f'route_after_execution retry_count{state["retry_count"]}')
         return "refine_answer"
-
-    # 如果是分摊函数相关的参数错误，重新分析意图提取参数
-    if "target_bl" in str(error) or "year" in str(error) or "scenario" in str(error):
-        # 清除旧的意图分析结果，以便重新分析
-        state["intent_analysis"] = None
-        return "analyze_intent"
-
     # 如果重试次数超过一定阈值（例如2次），且仍有错误，尝试重新分析意图
     # 这有助于处理因意图理解偏差导致的持续执行错误
     if state["retry_count"] > 2:
@@ -588,108 +496,6 @@ def route_after_execution(
         return "analyze_intent"
 
     return "generate_sql"
-
-
-def route_after_intent(
-    state: AgentState,
-) -> Literal["generate_sql", "allocate_costs"]:
-    """意图分析后的路由"""
-    intent_analysis = state.get("intent_analysis")
-
-    if not intent_analysis:
-        return "generate_sql"
-
-    try:
-        # 如果是 Pydantic 对象
-        if isinstance(intent_analysis, IntentAnalysisResult):
-            next_step = intent_analysis.next_step
-            if next_step == "allocate_costs":
-                # 检查参数是否完整
-                params = intent_analysis.parameters
-                if (
-                    params
-                    and params.target_bl
-                    and params.year
-                    and params.scenario
-                    and params.function
-                ):
-                    return "allocate_costs"
-                else:
-                    logger.warning(
-                        f"意图指向分摊但参数不完整: {params}，回退到普通 SQL 生成模式"
-                    )
-                    return "generate_sql"
-            return "generate_sql"
-
-        # 兼容旧逻辑（如果 intent_analysis 是字符串）
-        intent_json_str = str(intent_analysis)
-        # 尝试解析 JSON
-        # 清理可能的 markdown 代码块标记
-        clean_json = (
-            intent_json_str.replace("```json", "")
-            .replace("```", "")
-            .strip()
-            .strip("`")
-            .strip()
-        )
-        intent_data = json.loads(clean_json)
-
-        next_step = intent_data.get("next_step")
-        if next_step == "allocate_costs":
-            # 检查参数是否完整
-            params = intent_data.get("parameters", {})
-            if (
-                params
-                and "target_bl" in params
-                and "year" in params
-                and "scenario" in params
-                and "function" in params
-            ):
-                return "allocate_costs"
-            else:
-                logger.warning(
-                    f"意图指向分摊但参数不完整: {params}，回退到普通 SQL 生成模式"
-                )
-                return "generate_sql"
-        elif next_step == "generate_sql":
-            return "generate_sql"
-        else:
-            logger.warning(f"未知的 next_step: {next_step}，默认使用 generate_sql")
-            return "generate_sql"
-
-    except json.JSONDecodeError:
-        logger.error(f"意图分析结果非合法 JSON: {intent_analysis}")
-        # 降级处理：尝试用之前的正则逻辑或直接去 SQL 生成
-        return "generate_sql"
-    except Exception as e:
-        logger.error(f"路由判断出错: {e}")
-        return "generate_sql"
-
-
-def route_after_allocation(
-    state: AgentState,
-) -> Literal["analyze_intent", "refine_answer"]:
-    """分摊计算后的路由"""
-    error = state.get("error_message", "")
-
-    if not error and "" not in error or state["retry_count"] >= 5:
-        # logger.error(f"before refine_answer1: {error}")
-        return "refine_answer"
-    if "" in error or "function必须包含Allocation" in error:
-        reset_analysis(state)
-        return "analyze_intent"
-
-    if (
-        "target_bl" in error
-        or "year" in error
-        or "scenario" in error
-        or "function" in error
-    ):
-        reset_analysis(state)
-        return "analyze_intent"
-    # logger.error(f"before refine_answer2: {error}")
-    return "refine_answer"
-
 
 def build_graph() -> StateGraph:
     """构建 SQL 自修正工作流"""
@@ -701,7 +507,7 @@ def build_graph() -> StateGraph:
     workflow.add_node("analyze_intent", analyze_intent_node)
     workflow.add_node("generate_sql", generate_sql_node)
     workflow.add_node("validate_sql", validate_sql_node)
-    workflow.add_node("allocate_costs", allocate_costs_node)
+    # workflow.add_node("allocate_costs", allocate_costs_node)
     workflow.add_node("execute_sql", execute_sql_node)
     workflow.add_node("refine_answer", refine_answer_node)
 
@@ -711,21 +517,9 @@ def build_graph() -> StateGraph:
     # 边连接
     workflow.add_edge("load_context", "analyze_intent")
 
-    # 使用条件边路由意图
-    workflow.add_conditional_edges(
-        "analyze_intent",
-        route_after_intent,
-        {
-            "generate_sql": "generate_sql",
-            "allocate_costs": "allocate_costs",
-        },
-    )
 
+    workflow.add_edge("analyze_intent", "generate_sql")
     workflow.add_edge("generate_sql", "validate_sql")
-    workflow.add_edge("validate_sql", "execute_sql")
-    workflow.add_edge("execute_sql", "refine_answer")
-    # workflow.add_edge("allocate_costs", "refine_answer")
-
     workflow.add_conditional_edges(
         "validate_sql",
         route_after_validation,
@@ -735,15 +529,6 @@ def build_graph() -> StateGraph:
             "refine_answer": "refine_answer",
         },
     )
-    workflow.add_conditional_edges(
-        "allocate_costs",
-        route_after_allocation,
-        {
-            "analyze_intent": "analyze_intent",
-            "refine_answer": "refine_answer",
-        },
-    )
-
     workflow.add_conditional_edges(
         "execute_sql",
         route_after_execution,
@@ -757,10 +542,6 @@ def build_graph() -> StateGraph:
     workflow.add_edge("refine_answer", END)
 
     return workflow.compile()
-
-
-# ... (保持 get_graph, reset_graph 不变)
-
 
 # 全局图实例
 _graph = None

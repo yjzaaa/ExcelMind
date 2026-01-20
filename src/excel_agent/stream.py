@@ -67,24 +67,6 @@ SYSTEM_PROMPT = """你是一个专业的 Excel 数据分析助手。
 """
 
 
-def get_llm():
-    """获取 LLM 实例"""
-    config = get_config()
-    provider = config.model.get_active_provider()
-
-    if not provider.api_key:
-        raise ValueError(
-            f"API Key 未配置。请检查 config.yaml 或设置环境变量 (当前提供者: {config.model.active})"
-        )
-
-    return ChatOpenAI(
-        model=provider.model_name,
-        api_key=provider.api_key,
-        base_url=provider.base_url if provider.base_url else None,
-        temperature=provider.temperature,
-        max_tokens=provider.max_tokens,
-    )
-
 
 async def stream_chat(
     message: str, history: list = None
