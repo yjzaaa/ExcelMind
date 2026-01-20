@@ -21,7 +21,8 @@ logger = get_logger("analysis_runner")
 
 async def run_analysis():
     # 1. 设置文件路径
-    file_path = r"D:\FI\FI\back_end_code\Data\Function cost allocation analysis to IT 20260104.xlsx"
+    # file_path = r"D:\FI\FI\back_end_code\Data\Function cost allocation analysis to IT 20260104.xlsx"
+    file_path = r"""D:\AI_Python\AI2\AI2\back_end_code\Data\Function cost allocation analysis to IT 20260104.xlsx"""
     load_dotenv()
     logger.info(f"📂 正在加载数据文件: {file_path}")
 
@@ -65,12 +66,14 @@ async def run_analysis():
     query = "What was the actual  HR cost allocated to CT in FY25?"
     # query = "26财年采购的预算费用和25财年实际数比，变化是什么？"
     query = "What services do IT cost service include? "
-    query ="26财年采购的预算费用和25财年实际数比，变化是什么？"
-    query ="How is the change of  HR allocation to 413001 between  FY26 BGT and FY25 Actual?"
+    query = "26财年IT的预算费用和25财年实际数比，变化是什么？"
+    # query = "How is the change of  HR allocation to 413001 between  FY26 BGT and FY25 Actual?"
+    # query = "What is the monthly trend of HR costs in FY24 Actual?"
+
     # query ="26财年预算要分摊给412001的HR费用和25财年实际分摊给CT的HR费用相比，变化是怎么样的？"
     # query ="26财年IT的预算费用和25财年实际数比，变化是什么？"
     # query ="近些年hr分摊给其它部门的费用以及趋势？"
-    query ="近些年hr的费用以及趋势？"
+    # query = "近些年hr的费用以及趋势？"
     # query ="IT有哪些服务？"
     # query ="请给出费用表的预览"
     # query ="HR分摊给其它部门的费用大于974,916.67的有哪些年的哪几个月"
@@ -90,7 +93,7 @@ async def run_analysis():
     try:
         async for event in graph.astream(inputs, config={"recursion_limit": 15}):
             for key, value in event.items():
-                logger.info("-" * 50+key+"-" * 50)
+                logger.info("-" * 50 + key + "-" * 50)
                 if key == "analyze_intent":
                     if value.get("error_message"):
                         logger.error(
@@ -151,7 +154,6 @@ async def run_analysis():
                     logger.info(f"📝 最终回答:\n{value.get('messages')[0].content}")
                     return value.get("messages")[0].content
 
-            
             logger.info(f"{key} ✅ 分析完成")
     except GraphRecursionError:
         logger.error(

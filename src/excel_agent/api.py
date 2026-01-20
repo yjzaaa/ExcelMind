@@ -490,43 +490,56 @@ async def chat(request: ChatRequest):
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
     """与 Agent 对话（流式输出）"""
+    logger.info(f"Received stream chat request. Message: {request.message[:50]}...")
+
     loader = get_loader()
 
     if not loader.is_loaded:
+        logger.warning("Excel file not loaded, rejecting request")
         raise HTTPException(status_code=400, detail="请先加载 Excel 文件")
 
     # 获取当前活跃表ID，用于前端标记消息
     active_table_id = loader.active_table_id
+    logger.debug(f"Active table ID: {active_table_id}")
 
     async def generate():
-        # 执行图（流式）
-        graph = get_graph()
+        try:
+            # 执行图（流式）
+            # graph = get_graph() # stream_chat 内部会获取
 
-        # 准备输入
-        inputs = {
-            "messages": [HumanMessage(content=request.message)],
-            "is_relevant": True,
-        }
+            # 准备输入
+            inputs = {
+                "messages": [HumanMessage(content=request.message)],
+                "is_relevant": True,
+            }
 
-        # 先发送表ID信息
-        yield f"data: {json_dumps({'type': 'table_info', 'table_id': active_table_id}, ensure_ascii=False)}\n\n"
+            # 先发送表ID信息
+            yield f"data: {json_dumps({'type': 'table_info', 'table_id': active_table_id}, ensure_ascii=False)}\n\n"
 
-        # 处理流式输出并捕获 trace_id
-        current_trace_id = None
+            # 处理流式输出并捕获 trace_id
+            current_trace_id = None
 
-        # 这里我们需要更细粒度的控制流，以便获取 graph 的输出 state
-        # 但 stream_chat 是封装好的，我们可能需要修改 stream_chat 或在这里重新实现部分逻辑
-        # 简单起见，我们假设 stream_chat 会 yield 所有事件，包括 trace_id 更新
+            # 记录开始时间
+            start_time = datetime.now()
 
-        # 由于 stream_chat 目前只 yield 消息块，我们无法轻易获取 trace_id
-        # 临时方案：我们不修改 stream_chat，而是让 graph 内部通过回调或其他方式传递，
-        # 或者简化处理：流式暂不支持反馈功能，或者后续完善 stream.py
+            async for event in stream_chat(request.message, request.history):
+                # 记录关键事件日志
+                if event["type"] == "error":
+                    logger.error(f"Stream error: {event['content']}")
+                elif event["type"] == "trace_info":
+                    current_trace_id = event.get("trace_id")
+                    logger.info(f"Trace ID: {current_trace_id}")
 
-        # 为了支持反馈，我们在流式结束时，尝试从 graph state 中获取 trace_id (这需要重构 stream_chat)
-        # 现阶段我们仅在普通 chat 接口支持反馈。流式接口后续支持。
+                yield f"data: {json_dumps(event, ensure_ascii=False)}\n\n"
 
-        async for event in stream_chat(request.message, request.history):
-            yield f"data: {json_dumps(event, ensure_ascii=False)}\n\n"
+            duration = (datetime.now() - start_time).total_seconds()
+            logger.info(
+                f"Stream chat completed. Duration: {duration:.2f}s, Trace ID: {current_trace_id}"
+            )
+
+        except Exception as e:
+            logger.error(f"Stream generation failed: {str(e)}", exc_info=True)
+            yield f"data: {json_dumps({'type': 'error', 'content': f'服务器内部错误: {str(e)}'}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         generate(),

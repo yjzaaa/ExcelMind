@@ -6,7 +6,7 @@ from langchain_core.messages.base import BaseMessage
 import pandas as pd
 
 import operator
-import json,os
+import json, os
 from typing import Annotated, Any, Dict, List, Literal, TypedDict, Optional
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -49,7 +49,7 @@ class AgentState(TypedDict):
     # 意图分析
     intent_analysis: Annotated[Any, lambda x, y: y]  # Optional[IntentAnalysisResult]
     knowledge_context: Annotated[str, lambda x, y: y]  # RAG 检索到的知识上下文
-    all_tables_field_values:Annotated[str, lambda x, y: y]
+    all_tables_field_values: Annotated[str, lambda x, y: y]
     # SQL 流程状态
     user_query: Annotated[Optional[str], lambda x, y: y]
     sql_query: Annotated[Optional[str], lambda x, y: y]
@@ -62,7 +62,7 @@ class AgentState(TypedDict):
     # 这里我们希望后面的覆盖前面的，或者只接受一个。
     # 为了解决 InvalidUpdateError，我们显式声明它总是接受新值（覆盖）
     error_message: Annotated[Optional[str], lambda x, y: y]
-
+    sql_query_examples: Annotated[Optional[str], lambda x, y: y]
     retry_count: Annotated[Optional[int], lambda x, y: y]
 
 
@@ -85,15 +85,14 @@ def get_llm():
     """获取 LLM 实例"""
     config = get_config()
     provider = config.model.get_active_provider()
-    return init_chat_model(
-                model=os.getenv("OPENAI_MODEL_ID"),
-                model_provider=os.getenv("OPENAI_MODEL_PROVIDER"),
-                base_url=os.getenv("OPENAI_BASE_URL"),
-                api_version=os.getenv("OPENAI_API_VERSION"),
-                api_key=os.getenv("OPENAI_API_KEY"),
-                temperature=0.5
-            )
-
+    # return init_chat_model(
+    #             model=os.getenv("OPENAI_MODEL_ID"),
+    #             model_provider=os.getenv("OPENAI_MODEL_PROVIDER"),
+    #             base_url=os.getenv("OPENAI_BASE_URL"),
+    #             api_version=os.getenv("OPENAI_API_VERSION"),
+    #             api_key=os.getenv("OPENAI_API_KEY"),
+    #             temperature=0.5
+    #         )
 
     return ChatOpenAI(
         model=provider.model_name,
@@ -125,14 +124,18 @@ def load_context_node(state: AgentState) -> AgentState:
     if not state.get("trace_id"):
         state["trace_id"] = str(uuid.uuid4())
 
-
-
-    all_tables_field_values=loader.get_all_tables_field_values_json()
-    knowledge_context=loader.get_active_loader().business_logic_context
+    all_tables_field_values = loader.get_all_tables_field_values_json()
+    knowledge_context = loader.get_active_loader().business_logic_context
+    # common_questions_context = loader.get_active_loader().common_questions_context
+    with open(
+        "knowledge/sql_query_examples.md", "r", encoding="utf-8"
+    ) as f:
+        sql_query_examples = f.read()
     # 保存知识上下文到状态中
     state["knowledge_context"] = knowledge_context
-    state["all_tables_field_values"]=all_tables_field_values
+    state["all_tables_field_values"] = all_tables_field_values
     state["user_query"] = user_query
+    state["sql_query_examples"] = sql_query_examples
     state["retry_count"] = retry_count
     state["error_message"] = state.get("error_message", "")  # 继承之前的错误（如果有）
     return state
@@ -148,13 +151,16 @@ def analyze_intent_node(state: AgentState) -> AgentState:
     # 修改：允许重新分析意图，特别是当出现参数错误时
     # 我们检查是否有错误信息，如果有，说明是重试，需要在 prompt 中加入错误上下文
     try:
+        logger.info(
+            f"Starting intent analysis. Retry count: {state.get('retry_count', 0)}"
+        )
         loader = get_loader()
         excel_summary = (
             loader.get_summary() if loader.is_loaded else "未加载 Excel 文件"
         )
         user_query = state.get("user_query", "")
         error_context = state.get("error_message", "")
-       
+
         # 如果有错误上下文，且错误与参数缺失有关，提示 LLM 重新仔细提取参数
         additional_instruction = ""
         if error_context and (
@@ -163,6 +169,9 @@ def analyze_intent_node(state: AgentState) -> AgentState:
             or "scenario" in error_context
             or "function" in error_context
         ):
+            logger.info(
+                "Detected missing parameter error, adding instruction to prompt."
+            )
             additional_instruction = f"\n\n⚠️ 上一次尝试失败，错误信息：{error_context}。\n请务必仔细检查用户问题，重新提取缺失的参数 (target_bl, year, scenario, function)。"
 
         prompt = (
@@ -170,7 +179,7 @@ def analyze_intent_node(state: AgentState) -> AgentState:
                 excel_summary=excel_summary,
                 user_query=user_query,
                 knowledge_context=state["knowledge_context"],
-                all_tables_field_values=state["all_tables_field_values"]
+                all_tables_field_values=state["all_tables_field_values"],
             )
             + additional_instruction
         )
@@ -179,6 +188,8 @@ def analyze_intent_node(state: AgentState) -> AgentState:
         # structured_llm = llm.with_structured_output(IntentAnalysisResult)
         response = llm.invoke([HumanMessage(content=prompt)])
         state["intent_analysis"] = response
+
+        logger.debug(f"Intent analysis result: {response.content[:100]}...")
 
         # 写入意图缓存 (仅在成功且无错误时)
         # if not error_context:
@@ -190,15 +201,19 @@ def analyze_intent_node(state: AgentState) -> AgentState:
 
         return state
     except Exception as e:
+        logger.error(f"Intent analysis failed: {str(e)}", exc_info=True)
         state["error_message"] = f"意图分析节点执行错误。错误详情：{str(e)}"
         return state
 
 
 def generate_sql_node(state: AgentState) -> AgentState:
-    try :
+    try:
         """SQL 生成节点 (实际生成 Pandas 代码)"""
+        logger.info("Starting SQL generation.")
         loader = get_loader()
-        excel_summary = loader.get_summary() if loader.is_loaded else "未加载 Excel 文件"
+        excel_summary = (
+            loader.get_summary() if loader.is_loaded else "未加载 Excel 文件"
+        )
 
         user_query = state["user_query"]
         intent_analysis = state.get("intent_analysis", "")
@@ -211,6 +226,9 @@ def generate_sql_node(state: AgentState) -> AgentState:
         error_context = state.get("error_message", "")
 
         if error_context:
+            logger.info(
+                f"Retrying SQL generation with error context: {error_context[:50]}..."
+            )
             error_context = (
                 f"上一次尝试失败，错误信息：{error_context}。请根据错误修正代码。"
             )
@@ -219,14 +237,16 @@ def generate_sql_node(state: AgentState) -> AgentState:
         # 虽然 prompt 已经鼓励 LLM 使用工具，但我们可以通过特定的提示强化这一点
         # 或者，我们可以在这里通过规则判断：如果用户意图明确是计算分摊，我们可以尝试直接生成工具调用代码
 
-        all_tables_field_values=state["all_tables_field_values"]
+        all_tables_field_values = state["all_tables_field_values"]
+
         prompt = SQL_GENERATION_PROMPT.format(
             excel_summary=excel_summary,
             knowledge_context=knowledge_context,
             intent_analysis=intent_analysis,
             user_query=user_query,
             error_context=error_context,
-            all_tables_field_values=all_tables_field_values
+            sql_query_examples=state["sql_query_examples"],
+            all_tables_field_values=all_tables_field_values,
         )
         # logger.info(f"SQL prompt: {prompt}")
         llm = get_llm()
@@ -249,6 +269,8 @@ def generate_sql_node(state: AgentState) -> AgentState:
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
 
+            logger.info(f"LLM generated tool call: {tool_name}")
+
             # 构造 JSON 指令字符串
             import json
 
@@ -259,23 +281,26 @@ def generate_sql_node(state: AgentState) -> AgentState:
         else:
             # 清理 markdown 标记
             sql = response.content.replace("```python", "").replace("```", "").strip()
+            logger.info("LLM generated Pandas code.")
 
         # logger.info(f"生成的 Pandas 代码: {sql}")
         state["sql_query"] = sql
         state["retry_count"] = state["retry_count"] + 1
         return state
     except Exception as e:
-        state["error_message"] = f"enerate_sql节点执行错误。错误详情：{str(e)}"
+        logger.error(f"SQL generation failed: {str(e)}", exc_info=True)
+        state["error_message"] = f"generate_sql节点执行错误。错误详情：{str(e)}"
         return state
-    
 
 
 def validate_sql_node(state: AgentState) -> AgentState:
     try:
         """SQL 验证节点（适配 Pandas SQL 只读查询规则，精准校验）"""
+        logger.info("Starting SQL validation.")
         sql = state["sql_query"]
         # 空SQL直接校验失败
         if not sql or sql.strip() == "":
+            logger.warning("Validation failed: Empty SQL query.")
             state["error_message"] = "代码验证失败: SQL查询语句不能为空。"
             state["sql_valid"] = False
             return state
@@ -305,6 +330,9 @@ def validate_sql_node(state: AgentState) -> AgentState:
         for keyword in forbidden_keywords:
             # 关键字匹配区分大小写（如os.是危险的，Os.也拦截，SELECT是正常的）
             if keyword in sql:
+                logger.warning(
+                    f"Validation failed: Forbidden keyword '{keyword}' detected."
+                )
                 state["error_message"] = (
                     f"代码验证失败: 包含禁止的关键字 '{keyword}'。"
                     "请仅使用 Pandas 只读查询语法(SELECT)，禁止使用数据修改/文件读写/系统执行类语法。"
@@ -325,18 +353,24 @@ def validate_sql_node(state: AgentState) -> AgentState:
             else {}
         )
         # 无表结构则跳过结构校验（避免无数据时报错）
-        if not structure or "columns" not in structure or len(structure["columns"]) == 0:
+        if (
+            not structure
+            or "columns" not in structure
+            or len(structure["columns"]) == 0
+        ):
             state["sql_valid"] = True
             state["error_message"] = ""
             return state
 
         # 提取当前数据表的【所有合法列名】和【字段类型】
-        valid_column_names = [col["name"].lower() for col in structure.get("columns", [])]
+        valid_column_names = [
+            col["name"].lower() for col in structure.get("columns", [])
+        ]
         simple_columns = [
             f"{col['name']} ({col['dtype']})" for col in structure.get("columns", [])
         ]
         columns_info = f"Columns: {simple_columns}"
-        all_tables_field_values=state["all_tables_field_values"]
+        all_tables_field_values = state["all_tables_field_values"]
 
         # 4. LLM 精准校验（优化Prompt，贴合Pandas SQL规则，让校验结果更准确）
         # ✅ 改造Prompt核心：明确告知LLM是【Pandas SQL】+【仅校验SELECT语法】+【校验列名合法性】
@@ -359,22 +393,25 @@ def validate_sql_node(state: AgentState) -> AgentState:
 
         # 5. LLM校验结果判定
         if "INVALID" in result:
+            logger.warning(f"Validation failed (LLM): {response.content.strip()}")
             state["error_message"] = f"代码验证失败: {response.content.strip()}"
             state["sql_valid"] = False
             return state
 
         # 所有校验通过
+        logger.info("SQL validation passed.")
         state["sql_valid"] = True
         state["error_message"] = ""
         return state
     except Exception as e:
+        logger.error(f"SQL validation error: {str(e)}", exc_info=True)
         state["error_message"] = f"validate_sql_node节点执行错误。错误详情：{str(e)}"
         return state
-    
 
 
 def execute_sql_node(state: AgentState) -> AgentState:
     """SQL 执行节点 (实际执行 Pandas 或直接调用工具)"""
+    logger.info("Starting execution.")
     sql = state["sql_query"]
 
     # 检查是否为工具调用指令 (JSON 格式)
@@ -385,6 +422,8 @@ def execute_sql_node(state: AgentState) -> AgentState:
             tool_data = json.loads(sql)
             tool_name = tool_data.get("tool_call")
             params = tool_data.get("parameters", {})
+
+            logger.info(f"Executing tool: {tool_name}")
 
             # 查找对应工具
             target_tool = None
@@ -399,39 +438,49 @@ def execute_sql_node(state: AgentState) -> AgentState:
 
                 # 处理工具返回结果
                 if isinstance(result, dict) and "error" in result and result["error"]:
+                    logger.error(f"Tool execution failed: {result['error']}")
                     state["error_message"] = f"工具执行错误: {result['error']}"
                     return state
 
                 state["execution_result"] = str(result)
                 state["error_message"] = ""
+                logger.info("Tool execution successful.")
                 return state
             else:
+                logger.error(f"Tool not found: {tool_name}")
                 state["error_message"] = f"未找到工具: {tool_name}"
                 return state
 
         except json.JSONDecodeError:
+            logger.warning("JSON decode failed, falling back to Pandas execution.")
             pass  # 如果解析失败，尝试作为普通 SQL 执行
         except Exception as e:
+            logger.error(f"Tool parsing failed: {str(e)}", exc_info=True)
             state["error_message"] = f"工具调用解析失败: {str(e)}"
             return state
 
     # 调用 tools.py 中的 execute_pandas_query
     # execute_pandas_query 是一个 StructuredTool 对象，需要调用其 invoke 方法
+    logger.info("Executing Pandas query.")
     result = execute_pandas_query.invoke({"query": sql})
 
     if "error" in result:
+        logger.warning(f"Pandas execution failed: {result['error']}")
         # logger.warning(f"Pandas 执行出错: {result['error']}")
         state["error_message"] = f"执行出错: {result['error']}"
         return state
 
     result_str = str(result)
     # logger.info(f"Pandas 执行成功，结果长度: {len(result_str)}")
+    logger.info(f"Pandas execution successful. Result length: {len(result_str)}")
     state["execution_result"] = result_str
     state["error_message"] = ""
     return state  # 清除错误
 
+
 def refine_answer_node(state: AgentState) -> AgentState:
     """生成最终回答节点"""
+    logger.info("Refining final answer.")
     user_query = state["user_query"]
     sql = state.get("sql_query", "未生成 SQL")
     execution_result = state.get("execution_result", "无结果")
@@ -445,6 +494,7 @@ def refine_answer_node(state: AgentState) -> AgentState:
         "error" in str(execution_result).lower()
         or "exception" in str(execution_result).lower()
     ):
+        logger.warning("Execution result contains errors, adding warning to prompt.")
         prompt += "\n\n⚠️ SYSTEM WARNING: 检测到执行结果包含错误信息。你必须停止尝试回答用户的问题数据。**绝对禁止**输出任何数据表格或数值。请仅解释错误原因。"
 
     llm = get_llm()
@@ -456,9 +506,11 @@ def refine_answer_node(state: AgentState) -> AgentState:
         try:
             TraceStore.save_trace(state["trace_id"], state)
             # logger.info(f"Trace saved: {state['trace_id']}")
+            logger.debug(f"Trace saved: {state['trace_id']}")
         except Exception as e:
             logger.warning(f"Failed to save trace: {e}")
 
+    logger.info("Final answer generated.")
     return state
 
 
@@ -483,7 +535,9 @@ def route_after_execution(
     """执行后的路由"""
     error = state.get("error_message", "")
     if not error:
-        logger.info(f' route_after_execution not error retry_count{state["retry_count"]}')
+        logger.info(
+            f' route_after_execution not error retry_count{state["retry_count"]}'
+        )
         return "refine_answer"
 
     if state["retry_count"] >= 5:
@@ -496,6 +550,7 @@ def route_after_execution(
         return "analyze_intent"
 
     return "generate_sql"
+
 
 def build_graph() -> StateGraph:
     """构建 SQL 自修正工作流"""
@@ -516,7 +571,6 @@ def build_graph() -> StateGraph:
 
     # 边连接
     workflow.add_edge("load_context", "analyze_intent")
-
 
     workflow.add_edge("analyze_intent", "generate_sql")
     workflow.add_edge("generate_sql", "validate_sql")
@@ -542,6 +596,7 @@ def build_graph() -> StateGraph:
     workflow.add_edge("refine_answer", END)
 
     return workflow.compile()
+
 
 # 全局图实例
 _graph = None

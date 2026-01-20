@@ -67,7 +67,6 @@ SYSTEM_PROMPT = """你是一个专业的 Excel 数据分析助手。
 """
 
 
-
 async def stream_chat(
     message: str, history: list = None
 ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -123,7 +122,12 @@ async def stream_chat(
         final_answer_started = False
         trace_id = None
 
-        async for event in graph.astream_events(input_state, version="v2"):
+        # 增加 recursion_limit 以防止复杂任务或多次重试导致图执行中断
+        config = {"recursion_limit": 14}
+
+        async for event in graph.astream_events(
+            input_state, version="v2", config=config
+        ):
             kind = event["event"]
 
             # 1. 获取 Trace ID (在链结束或节点更新时)
@@ -167,6 +171,7 @@ async def stream_chat(
     except Exception as e:
         import traceback
 
-        traceback.print_exc()
+        logger.error(f"Stream processing failed: {str(e)}", exc_info=True)
+        # traceback.print_exc() # 使用 logger 替代直接打印
         yield {"type": "thinking_done"}
         yield {"type": "error", "content": f"处理出错: {str(e)}"}

@@ -519,7 +519,7 @@ def calculate(expressions: List[str]) -> Dict[str, Any]:
     """执行数学计算。
 
     Args:
-        expressions: 数学表达式列表，例如 ["(100+200)*0.5", "500/2"]
+        expressions: 数学表达式列表，e.g. ["(100+200)*0.5", "500/2"]
 
     Returns:
         每个表达式的计算结果
@@ -1138,7 +1138,6 @@ def calculate_allocated_costs(
         return {"error": f"分摊计算出错: {str(e)}"}
 
 
-
 @tool
 def compare_allocated_costs(
     target1: str,
@@ -1169,7 +1168,7 @@ def compare_allocated_costs(
         对比结果表
     """
     try:
-        if target1 !=target2:
+        if target1 != target2:
             return {"error": f"target1 必须与 target2相同"}
             # 分别计算两个场景的分摊
         df1 = _calculate_allocated_costs_impl(
@@ -1381,7 +1380,7 @@ def compare_scenarios(
         return {"error": f"场景对比出错: {str(e)}"}
 
 
-# @tool
+@tool
 def execute_pandas_query(query: str, limit: int = 100) -> Dict[str, Any]:
     """执行 Pandas 查询。
 
@@ -1390,7 +1389,7 @@ def execute_pandas_query(query: str, limit: int = 100) -> Dict[str, Any]:
 
     Args:
         query: Pandas 查询字符串或 Python 表达式
-               例如:
+               e.g:
                - df.query("Year == 'FY26'")
                - df[df['Year'] == 'FY26'][['cost text', 'Allocation Key']]
                - df.groupby('Function')['Amount'].sum()
