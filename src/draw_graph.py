@@ -1,5 +1,5 @@
 import os
-from excel_agent.graph import get_graph
+from graph import get_graph
 
 def draw_graph():
     graph = get_graph()

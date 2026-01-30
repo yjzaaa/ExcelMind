@@ -1326,7 +1326,39 @@ def _compare_scenarios_impl(
     cdb = tables.get("CostDataBase")
 
     if cdb is None:
-        raise ValueError("未找到 CostDataBase 表")
+        # 尝试使用 SQL Server 数据源
+        from sqlserver import execute_sql_query
+
+        def _sum_amount_sql(year: str, scenario: str, func: Optional[str]) -> float:
+            where_parts = [f"[Year] = '{year}'", f"[Scenario] = '{scenario}'"]
+            if func:
+                where_parts.append(f"[Function] = '{func}'")
+            where_clause = " AND ".join(where_parts)
+            sql = (
+                "SELECT COALESCE(SUM(CAST([Amount] AS FLOAT)), 0) AS total "
+                "FROM SSME_FI_InsightBot_CostDataBase "
+                f"WHERE {where_clause}"
+            )
+            df = execute_sql_query(sql)
+            if df.empty:
+                return 0.0
+            return float(df.iloc[0]["total"] or 0)
+
+        amount1 = _sum_amount_sql(year1, scenario1, function)
+        amount2 = _sum_amount_sql(year2, scenario2, function)
+
+        diff = amount1 - amount2
+        pct_change = (diff / amount2 * 100) if amount2 != 0 else 0
+
+        return pd.DataFrame(
+            {
+                "Metric": ["Amount"],
+                f"{year1} {scenario1}": [amount1],
+                f"{year2} {scenario2}": [amount2],
+                "Difference": [diff],
+                "Pct_Change": [pct_change],
+            }
+        )
 
     # 获取两个场景的数据
     def get_amount(y, s, f):

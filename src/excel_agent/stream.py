@@ -140,7 +140,7 @@ async def stream_chat(
                         trace_id = output["trace_id"]
                         yield {"type": "trace_info", "trace_id": trace_id}
 
-            # 2. 获取思考过程 (RAG, Intent Analysis, SQL Generation 等节点的输出)
+            # 2. 获取思考过程 (Intent Analysis, SQL Generation 等节点的输出)
             # 我们可以监听特定节点的 on_chain_end
             if kind == "on_chain_end":
                 name = event.get("name")

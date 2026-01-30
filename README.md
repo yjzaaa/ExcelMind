@@ -16,32 +16,36 @@
 ## ✨ 功能亮点
 
 ### 🎯 核心能力
+
 - **自然语言查询**: 用中文直接提问，无需编写代码或公式
 - **多轮对话**: 支持上下文关联的连续追问（如"和上个月相比呢？"）
 - **流式输出**: 实时显示 AI 思考过程和回答，响应更流畅
 - **智能工具调用**: 自动选择合适的数据分析工具，展示完整推理链路
 
 ### 🛠️ 丰富的数据分析工具
-| 工具 | 功能 | 特性 |
-|------|------|------|
-| `filter_data` | 筛选+排序 | 支持多条件 AND、排序、指定返回列 |
-| `aggregate_data` | 聚合统计 | 支持先筛选再聚合 |
-| `group_and_aggregate` | 分组聚合 | 支持筛选后分组 |
-| `search_data` | 关键词搜索 | 可限制搜索范围 |
-| `get_column_stats` | 列统计 | 支持筛选后统计 |
-| `get_unique_values` | 唯一值 | 支持筛选后获取 |
-| `get_data_preview` | 数据预览 | 快速查看数据 |
-| `get_current_time` | 获取时间 | 处理相对时间查询 |
-| `calculate` | 数学计算 | 批量精确计算 |
-| `generate_chart` | **图表生成** | ECharts 可视化，AI 自动推荐图表类型 |
+
+| 工具                  | 功能         | 特性                                |
+| --------------------- | ------------ | ----------------------------------- |
+| `filter_data`         | 筛选+排序    | 支持多条件 AND、排序、指定返回列    |
+| `aggregate_data`      | 聚合统计     | 支持先筛选再聚合                    |
+| `group_and_aggregate` | 分组聚合     | 支持筛选后分组                      |
+| `search_data`         | 关键词搜索   | 可限制搜索范围                      |
+| `get_column_stats`    | 列统计       | 支持筛选后统计                      |
+| `get_unique_values`   | 唯一值       | 支持筛选后获取                      |
+| `get_data_preview`    | 数据预览     | 快速查看数据                        |
+| `get_current_time`    | 获取时间     | 处理相对时间查询                    |
+| `calculate`           | 数学计算     | 批量精确计算                        |
+| `generate_chart`      | **图表生成** | ECharts 可视化，AI 自动推荐图表类型 |
 
 ### 🔄 多表协同
+
 - **多表管理**: 同时上传和管理多个 Excel 表格
 - **智能联表**: AI 自动分析表结构，通过 `🤖 智能联表` 功能一键生成连接建议
 - **灵活连接**: 支持多字段（复合键）连接，以及 Inner/Left/Right/Outer 等多种连接方式
 - **上下文感知**: 对话时明确显示当前所在的表格上下文
 
 ### 📚 本地知识库
+
 - **私有知识存储**: 存储业务规则、字段说明、操作指南等私有知识
 - **向量检索**: 基于 Chroma 向量数据库，使用 Embedding 模型进行语义检索
 - **智能召回**: 对话时自动检索相关知识，注入到 Prompt 提升回答质量
@@ -49,12 +53,14 @@
 - **持久化存储**: 知识向量化后自动持久化，重启不丢失
 
 ### 📈 ECharts 图表可视化 (NEW)
+
 - **多图表类型**: 支持柱状图、折线图、饼图、散点图、雷达图、漏斗图
 - **AI 自动推荐**: 根据数据特征智能推荐最合适的图表类型
 - **交互式图表**: 基于 ECharts 5.5，支持悬停提示、图例切换、响应式布局
 - **自然语言触发**: 直接说"帮我画个图表"或"可视化销售数据"即可生成
 
 ### 🦺 现代化 Web 界面
+
 - **双主题模式**: 支持亮色/暗色主题一键切换，自动记忆用户偏好
 - **侧边栏管理**: 清晰的表格列表和操作入口
 - **拖拽上传**: 支持多文件拖拽上传，带进度提示
@@ -64,6 +70,7 @@
 - **Markdown 渲染**: 完美支持表格、代码块等格式
 
 ### 🛡️ 安全与稳定
+
 - **意图过滤**: 自动拒绝与 Excel 数据无关的闲聊
 - **类型兼容**: 工具参数支持多种数据类型（字符串、数值、日期）
 - **模糊匹配**: 日期字段支持前缀匹配（如 "202511" 匹配 "20251104"）
@@ -72,6 +79,7 @@
 ## 🚀 快速开始
 
 ### 环境要求
+
 - Python 3.11+
 - [uv](https://github.com/astral-sh/uv) (推荐) 或 pip
 
@@ -99,9 +107,9 @@ pip install -e .
 ```yaml
 model:
   provider: "openai"
-  model_name: "gpt-4"  # 或其他兼容模型
+  model_name: "gpt-4" # 或其他兼容模型
   api_key: "your-api-key"
-  base_url: "https://api.openai.com/v1"  # 可选，自定义端点
+  base_url: "https://api.openai.com/v1" # 可选，自定义端点
   temperature: 0.1
   max_tokens: 4096
 
@@ -135,6 +143,7 @@ uv run python -m excel_agent.main cli --excel your_file.xlsx
 ### 5. 使用
 
 打开浏览器访问 `http://localhost:8000`：
+
 1. 拖拽或点击上传 Excel 文件
 2. 在聊天框输入自然语言问题
 3. 查看 AI 的思考过程和分析结果
@@ -145,15 +154,15 @@ uv run python -m excel_agent.main cli --excel your_file.xlsx
 
 ### 主要接口
 
-| 接口 | 方法 | 描述 |
-|------|------|------|
-| `/` | GET | Web 界面 |
-| `/upload` | POST | 上传 Excel 文件 |
-| `/load` | POST | 通过路径加载 Excel |
-| `/chat/stream` | POST | 流式对话（推荐） |
-| `/chat` | POST | 非流式对话 |
-| `/status` | GET | 获取当前状态 |
-| `/reset` | POST | 重置 Agent |
+| 接口           | 方法 | 描述               |
+| -------------- | ---- | ------------------ |
+| `/`            | GET  | Web 界面           |
+| `/upload`      | POST | 上传 Excel 文件    |
+| `/load`        | POST | 通过路径加载 Excel |
+| `/chat/stream` | POST | 流式对话（推荐）   |
+| `/chat`        | POST | 非流式对话         |
+| `/status`      | GET  | 获取当前状态       |
+| `/reset`       | POST | 重置 Agent         |
 
 ### 请求示例
 
@@ -185,19 +194,22 @@ Excel_Agent/
 │   └── *.md                 # Markdown 格式知识文件
 ├── .vector_db/              # Chroma 向量数据库（自动生成）
 └── src/
+    ├── graph/
+    │   ├── __init__.py
+    │   └── graph.py         # LangGraph 工作流（新位置）
     └── excel_agent/
-        ├── __init__.py
-        ├── main.py          # 入口
-        ├── api.py           # FastAPI 接口
-        ├── config.py        # 配置管理
-        ├── excel_loader.py  # Excel 加载器
-        ├── graph.py         # LangGraph 工作流
-        ├── knowledge_base.py # 知识库管理
-        ├── prompts.py       # 提示词模板
-        ├── stream.py        # 流式对话核心
-        ├── tools.py         # 数据分析工具
-        └── frontend/
-            └── index.html   # Web 界面
+      ├── __init__.py
+      ├── main.py          # 入口
+      ├── api.py           # FastAPI 接口
+      ├── config.py        # 配置管理
+      ├── excel_loader.py  # Excel 加载器
+      ├── graph.py         # 兼容入口（已弃用）
+      ├── knowledge_base.py # 知识库管理
+      ├── prompts.py       # 提示词模板
+      ├── stream.py        # 流式对话核心
+      ├── tools.py         # 数据分析工具
+      └── frontend/
+        └── index.html   # Web 界面
 ```
 
 ## 🐳 Docker 部署
@@ -269,4 +281,3 @@ uv run ruff format .
 ## 💬 社区交流
 
 ![QQ群名片](docs/card.png)
-

@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional
 from langchain_openai import ChatOpenAI
 
 from .config import get_config
-from .prompts import JOIN_SUGGEST_PROMPT
+from promts import JOIN_SUGGEST_PROMPT, render_prompt
 
 
 def get_llm():
@@ -37,9 +37,10 @@ def suggest_join_config(table1_summary: str, table2_summary: str) -> Dict[str, A
         ValueError: AI返回格式错误或缺少必要字段
     """
     # 构建prompt
-    prompt = JOIN_SUGGEST_PROMPT.format(
+    prompt = render_prompt(
+        JOIN_SUGGEST_PROMPT,
         table1_summary=table1_summary,
-        table2_summary=table2_summary
+        table2_summary=table2_summary,
     )
     
     # 调用LLM

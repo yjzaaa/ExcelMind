@@ -1,7 +1,10 @@
 import asyncio
+import os
 import pandas as pd
+import pytest
+import pyodbc
 from langchain_core.messages import HumanMessage
-from excel_agent.graph import get_graph
+from graph import get_graph
 from excel_agent.excel_loader import get_loader
 
 # 模拟数据
@@ -55,39 +58,61 @@ def setup_mock_data():
     
     print("✅ 模拟数据加载完成")
 
-async def test_workflow():
-    setup_mock_data()
-    
-    graph = get_graph()
-    
-    # 测试问题：包含业务术语和字段查询
-    query = "26财年IT费用的服务内容有哪些？以及它们是按什么分摊的？"
-    print(f"\n🔍 测试问题: {query}")
-    print("-" * 50)
-    
-    inputs = {"messages": [HumanMessage(content=query)]}
-    
-    print("🚀 开始执行工作流...")
-    async for event in graph.astream(inputs):
-        for key, value in event.items():
-            print(f"\n📍 节点: {key}")
-            if key == "analyze_intent":
-                print(f"   意图分析: {value.get('intent_analysis')[:100]}...")
-            elif key == "generate_sql":
-                print(f"   生成 SQL: {value.get('sql_query')}")
-            elif key == "validate_sql":
-                valid = value.get('sql_valid')
-                print(f"   验证结果: {'✅ 通过' if valid else '❌ 失败'}")
-                if not valid:
-                    print(f"   错误信息: {value.get('error_message')}")
-            elif key == "execute_sql":
-                result = value.get('execution_result')
-                print(f"   执行结果预览: {result[:200] if result else 'None'}...")
-            elif key == "refine_answer":
-                print(f"   最终回答: {value.get('messages')[0].content}")
-                
-    print("-" * 50)
-    print("✅ 测试完成")
+def _has_sqlserver_config() -> bool:
+    return bool(
+        os.getenv("SQLSERVER_CONNECTION_STRING")
+        or (
+            (os.getenv("SQLSERVER_HOST") or os.getenv("database_url"))
+            and (os.getenv("SQLSERVER_DATABASE") or os.getenv("database_name"))
+        )
+    )
+
+
+def test_workflow():
+    if not _has_sqlserver_config():
+        pytest.skip("SQL Server 配置缺失，跳过工作流测试")
+    drivers = pyodbc.drivers()
+    if not any("sql server" in d.lower() for d in drivers):
+        pytest.skip("未检测到 SQL Server ODBC 驱动，跳过工作流测试")
+    async def _run():
+        setup_mock_data()
+
+        graph = get_graph()
+
+        # 测试问题：包含业务术语和字段查询
+        query = "26财年IT费用的服务内容有哪些？以及它们是按什么分摊的？"
+        print(f"\n🔍 测试问题: {query}")
+        print("-" * 50)
+
+        inputs = {"messages": [HumanMessage(content=query)]}
+
+        print("🚀 开始执行工作流...")
+        async for event in graph.astream(inputs):
+            for key, value in event.items():
+                print(f"\n📍 节点: {key}")
+                if key == "analyze_intent":
+                        intent = value.get("intent_analysis")
+                        intent_preview = (
+                            intent[:100] if isinstance(intent, str) else str(intent)
+                        )
+                        print(f"   意图分析: {intent_preview}...")
+                elif key == "generate_sql":
+                    print(f"   生成 SQL: {value.get('sql_query')}")
+                elif key == "validate_sql":
+                    valid = value.get('sql_valid')
+                    print(f"   验证结果: {'✅ 通过' if valid else '❌ 失败'}")
+                    if not valid:
+                        print(f"   错误信息: {value.get('error_message')}")
+                elif key == "execute_sql":
+                    result = value.get('execution_result')
+                    print(f"   执行结果预览: {result[:200] if result else 'None'}...")
+                elif key == "refine_answer":
+                    print(f"   最终回答: {value.get('messages')[0].content}")
+
+        print("-" * 50)
+        print("✅ 测试完成")
+
+    asyncio.run(_run())
 
 if __name__ == "__main__":
-    asyncio.run(test_workflow())
+    test_workflow()
